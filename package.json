@@ -1,0 +1,17 @@
+{
+  "name": "notification-server-for-render",
+  "version": "1.0.0",
+  "description": "Server to listen to Firebase and send Discord notifications 24/7",
+  "main": "firebase-notification-server.js",
+  "scripts": {
+    "start": "node firebase-notification-server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "firebase-admin": "^11.11.0",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}

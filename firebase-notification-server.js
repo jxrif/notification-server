@@ -59,6 +59,10 @@ let jarifIsCurrentlyOnline = false;
 let previousFiOnlineState = false;
 let processedMessageIds = new Set();
 let processedPresenceEvents = new Set();
+let lastPresenceNotificationTime = 0;
+let lastMessageNotificationTime = 0;
+const PRESENCE_COOLDOWN = 5000; // 5 seconds
+const MESSAGE_COOLDOWN = 10000; // 10 seconds
 
 // ==================== HELPER FUNCTIONS ====================
 async function sendDiscordNotification(
@@ -72,31 +76,58 @@ async function sendDiscordNotification(
     return;
   }
 
-  // Check for activity notification cooldown (1 second)
+  // Check cooldown for presence notifications
   if (isActivity || isOffline) {
-    const eventKey = `${isActivity ? "activity" : "offline"}_${Date.now()}`;
-    if (processedPresenceEvents.has(eventKey)) return;
-    processedPresenceEvents.add(eventKey);
-
-    // Clean up old events
-    if (processedPresenceEvents.size > 100) {
-      const arr = Array.from(processedPresenceEvents);
-      processedPresenceEvents = new Set(arr.slice(-50));
+    const now = Date.now();
+    if (now - lastPresenceNotificationTime < PRESENCE_COOLDOWN) {
+      console.log("⏭️ Skipping presence notification - cooldown active");
+      return;
     }
+    lastPresenceNotificationTime = now;
   }
 
-  const currentTime = new Date().toLocaleTimeString("en-US", {
+  // Check cooldown for message notifications
+  if (!isActivity && !isOffline) {
+    const now = Date.now();
+    if (now - lastMessageNotificationTime < MESSAGE_COOLDOWN) {
+      console.log("⏭️ Skipping message notification - cooldown active");
+      return;
+    }
+    lastMessageNotificationTime = now;
+  }
+
+  // Create event key for deduplication
+  const eventKey = `${
+    isActivity ? "activity" : isOffline ? "offline" : "message"
+  }_${Date.now()}`;
+  if (processedPresenceEvents.has(eventKey)) {
+    console.log("⏭️ Skipping duplicate event:", eventKey);
+    return;
+  }
+  processedPresenceEvents.add(eventKey);
+
+  // Clean up old events
+  if (processedPresenceEvents.size > 100) {
+    const arr = Array.from(processedPresenceEvents);
+    processedPresenceEvents = new Set(arr.slice(-50));
+  }
+
+  // Get correct time (IST - India Standard Time)
+  const now = new Date();
+  const istTime = new Date(now.getTime() + 5.5 * 60 * 60 * 1000); // UTC+5:30
+  const currentTime = istTime.toLocaleTimeString("en-IN", {
     hour: "numeric",
     minute: "2-digit",
     second: "2-digit",
     hour12: true,
+    timeZone: "Asia/Kolkata",
   });
 
   const footerText = isActivity
-    ? `Came online at ${currentTime}`
+    ? `Came online at ${currentTime} IST`
     : isOffline
-    ? `Went offline at ${currentTime}`
-    : `Sent at ${currentTime}`;
+    ? `Went offline at ${currentTime} IST`
+    : `Sent at ${currentTime} IST`;
 
   const webhookBody = {
     content: mention,
@@ -111,10 +142,12 @@ async function sendDiscordNotification(
 
   try {
     console.log(`📤 Sending Discord notification: ${embedDescription}`);
+    console.log(`🕐 Time: ${currentTime} IST`);
     const response = await fetch(DISCORD_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(webhookBody),
+      timeout: 5000,
     });
 
     if (response.ok) {
@@ -149,7 +182,9 @@ async function checkMessageForNotification(message) {
     textPreview: message.text
       ? message.text.substring(0, 50) + (message.text.length > 50 ? "..." : "")
       : "[No text]",
-    timestamp: new Date(message.timestampFull).toISOString(),
+    timestamp: new Date(message.timestampFull).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+    }),
   });
 
   // 2. Skip if already processed by this server
@@ -203,8 +238,12 @@ async function checkMessageForNotification(message) {
       const timeDifference = Math.abs(jarifPresence.lastSeen - messageTime);
       jarifWasOnlineAtMessageTime = timeDifference < 30000; // 30 seconds
       console.log("👤 Jarif presence check:", {
-        lastSeen: new Date(jarifPresence.lastSeen).toISOString(),
-        messageTime: new Date(messageTime).toISOString(),
+        lastSeen: new Date(jarifPresence.lastSeen).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        }),
+        messageTime: new Date(messageTime).toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+        }),
         difference: Math.round(timeDifference / 1000) + "s",
         wasOnline: jarifWasOnlineAtMessageTime,
       });
@@ -229,7 +268,7 @@ async function checkMessageForNotification(message) {
       false // isOffline
     );
     processedMessageIds.add(message.id);
-    // Optional: Clean up old IDs to prevent memory growth
+    // Clean up old IDs to prevent memory growth
     if (processedMessageIds.size > 1000) {
       const arr = Array.from(processedMessageIds);
       processedMessageIds = new Set(arr.slice(-500));
@@ -259,7 +298,9 @@ async function checkActivityForNotification(isActive, lastSeen) {
   console.log("👁️ Fi Activity Check:", {
     wasOnline,
     nowOnline,
-    lastSeen: lastSeen ? new Date(lastSeen).toISOString() : "null",
+    lastSeen: lastSeen
+      ? new Date(lastSeen).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
+      : "null",
     activityNotificationsEnabled: jarifSettings
       ? jarifSettings.activityNotifications
       : false,
@@ -325,7 +366,9 @@ function startFirebaseListeners() {
         if (messageTime < fiveMinutesAgo) {
           console.log(
             "⏭️ Skipping old message:",
-            new Date(messageTime).toISOString()
+            new Date(messageTime).toLocaleString("en-IN", {
+              timeZone: "Asia/Kolkata",
+            })
           );
           return;
         }
@@ -337,11 +380,19 @@ function startFirebaseListeners() {
     });
 
   // LISTENER 2: Fi's Presence (Online/Offline)
+  let lastFiPresenceState = null;
   db.ref("ephemeral/presence/Fidha").on("value", (snapshot) => {
     try {
       const val = snapshot.val();
       const isActive = val ? val.online : false;
       const lastSeen = val ? val.lastSeen : null;
+
+      // Skip if state hasn't changed
+      if (lastFiPresenceState === isActive) {
+        return;
+      }
+
+      lastFiPresenceState = isActive;
       checkActivityForNotification(isActive, lastSeen);
     } catch (error) {
       console.error("❌ Error in presence listener:", error);
@@ -359,7 +410,9 @@ function startFirebaseListeners() {
       console.log("👤 Jarif presence updated:", {
         online: jarifIsCurrentlyOnline,
         lastSeen: jarifLastOnlineTime
-          ? new Date(jarifLastOnlineTime).toISOString()
+          ? new Date(jarifLastOnlineTime).toLocaleString("en-IN", {
+              timeZone: "Asia/Kolkata",
+            })
           : "null",
       });
     } catch (error) {
@@ -374,7 +427,11 @@ function startFirebaseListeners() {
 startFirebaseListeners();
 app.listen(PORT, () => {
   console.log(`✅ Notification server running on port ${PORT}`);
-  console.log(`⏰ Server time: ${new Date().toISOString()}`);
+  console.log(
+    `⏰ Server time: ${new Date().toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+    })} IST`
+  );
 });
 
 // Handle graceful shutdown

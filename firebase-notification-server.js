@@ -112,22 +112,24 @@ async function sendDiscordNotification(
     processedPresenceEvents = new Set(arr.slice(-50));
   }
 
-  // Get correct time (IST - India Standard Time)
+  // Get correct time (Bahrain Time - UTC+3)
   const now = new Date();
-  const istTime = new Date(now.getTime() + 5.5 * 60 * 60 * 1000); // UTC+5:30
-  const currentTime = istTime.toLocaleTimeString("en-IN", {
+  const bahrainTime = new Date(
+    now.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
+  );
+  const currentTime = bahrainTime.toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
     second: "2-digit",
     hour12: true,
-    timeZone: "Asia/Kolkata",
   });
 
+  const timeSuffix = bahrainTime.getHours() >= 12 ? "PM" : "AM";
   const footerText = isActivity
-    ? `Came online at ${currentTime} IST`
+    ? `Came online at ${currentTime} AST`
     : isOffline
-    ? `Went offline at ${currentTime} IST`
-    : `Sent at ${currentTime} IST`;
+    ? `Went offline at ${currentTime} AST`
+    : `Sent at ${currentTime} AST`;
 
   const webhookBody = {
     content: mention,
@@ -136,13 +138,14 @@ async function sendDiscordNotification(
         description: embedDescription,
         color: isActivity ? 3066993 : isOffline ? 15158332 : 3447003,
         footer: { text: footerText },
+        timestamp: bahrainTime.toISOString(),
       },
     ],
   };
 
   try {
     console.log(`📤 Sending Discord notification: ${embedDescription}`);
-    console.log(`🕐 Time: ${currentTime} IST`);
+    console.log(`🕐 Time: ${currentTime} AST (Bahrain Time)`);
     const response = await fetch(DISCORD_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -169,6 +172,40 @@ async function sendDiscordNotification(
   }
 }
 
+// Helper to format time in Bahrain timezone
+function formatBahrainTime(timestamp) {
+  const date = new Date(timestamp);
+  const bahrainDate = new Date(
+    date.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
+  );
+  return (
+    bahrainDate.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    }) + " AST"
+  );
+}
+
+function formatBahrainDateTime(timestamp) {
+  const date = new Date(timestamp);
+  const bahrainDate = new Date(
+    date.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
+  );
+  return (
+    bahrainDate.toLocaleString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: "Asia/Bahrain",
+    }) + " AST"
+  );
+}
+
 // ==================== NOTIFICATION LOGIC ====================
 async function checkMessageForNotification(message) {
   // 1. Only messages from Fi to Jarif
@@ -176,15 +213,16 @@ async function checkMessageForNotification(message) {
     return;
   }
 
+  const bahrainTime = formatBahrainDateTime(
+    message.timestampFull || Date.now()
+  );
   console.log("🔍 Server checking message for notification:", {
     messageId: message.id,
     sender: message.sender,
     textPreview: message.text
       ? message.text.substring(0, 50) + (message.text.length > 50 ? "..." : "")
       : "[No text]",
-    timestamp: new Date(message.timestampFull).toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata",
-    }),
+    timestamp: bahrainTime,
   });
 
   // 2. Skip if already processed by this server
@@ -238,12 +276,8 @@ async function checkMessageForNotification(message) {
       const timeDifference = Math.abs(jarifPresence.lastSeen - messageTime);
       jarifWasOnlineAtMessageTime = timeDifference < 30000; // 30 seconds
       console.log("👤 Jarif presence check:", {
-        lastSeen: new Date(jarifPresence.lastSeen).toLocaleString("en-IN", {
-          timeZone: "Asia/Kolkata",
-        }),
-        messageTime: new Date(messageTime).toLocaleString("en-IN", {
-          timeZone: "Asia/Kolkata",
-        }),
+        lastSeen: formatBahrainDateTime(jarifPresence.lastSeen),
+        messageTime: formatBahrainDateTime(messageTime),
         difference: Math.round(timeDifference / 1000) + "s",
         wasOnline: jarifWasOnlineAtMessageTime,
       });
@@ -298,9 +332,7 @@ async function checkActivityForNotification(isActive, lastSeen) {
   console.log("👁️ Fi Activity Check:", {
     wasOnline,
     nowOnline,
-    lastSeen: lastSeen
-      ? new Date(lastSeen).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
-      : "null",
+    lastSeen: lastSeen ? formatBahrainDateTime(lastSeen) : "null",
     activityNotificationsEnabled: jarifSettings
       ? jarifSettings.activityNotifications
       : false,
@@ -366,9 +398,7 @@ function startFirebaseListeners() {
         if (messageTime < fiveMinutesAgo) {
           console.log(
             "⏭️ Skipping old message:",
-            new Date(messageTime).toLocaleString("en-IN", {
-              timeZone: "Asia/Kolkata",
-            })
+            formatBahrainDateTime(messageTime)
           );
           return;
         }
@@ -410,9 +440,7 @@ function startFirebaseListeners() {
       console.log("👤 Jarif presence updated:", {
         online: jarifIsCurrentlyOnline,
         lastSeen: jarifLastOnlineTime
-          ? new Date(jarifLastOnlineTime).toLocaleString("en-IN", {
-              timeZone: "Asia/Kolkata",
-            })
+          ? formatBahrainDateTime(jarifLastOnlineTime)
           : "null",
       });
     } catch (error) {
@@ -427,11 +455,18 @@ function startFirebaseListeners() {
 startFirebaseListeners();
 app.listen(PORT, () => {
   console.log(`✅ Notification server running on port ${PORT}`);
-  console.log(
-    `⏰ Server time: ${new Date().toLocaleString("en-IN", {
-      timeZone: "Asia/Kolkata",
-    })} IST`
+  const now = new Date();
+  const bahrainTime = new Date(
+    now.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
   );
+  const serverTime = bahrainTime.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Bahrain",
+  });
+  console.log(`⏰ Server time (Bahrain): ${serverTime} AST`);
 });
 
 // Handle graceful shutdown

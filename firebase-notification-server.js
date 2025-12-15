@@ -126,10 +126,10 @@ async function sendDiscordNotification(
 
   const timeSuffix = bahrainTime.getHours() >= 12 ? "PM" : "AM";
   const footerText = isActivity
-    ? `Came online at ${currentTime} AST`
+    ? `Came online at ${currentTime}`
     : isOffline
-    ? `Went offline at ${currentTime} AST`
-    : `Sent at ${currentTime} AST`;
+    ? `Went offline at ${currentTime}`
+    : `Sent at ${currentTime}`;
 
   const webhookBody = {
     content: mention,

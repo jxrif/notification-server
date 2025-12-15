@@ -138,7 +138,6 @@ async function sendDiscordNotification(
         description: embedDescription,
         color: isActivity ? 3066993 : isOffline ? 15158332 : 3447003,
         footer: { text: footerText },
-        timestamp: bahrainTime.toISOString(),
       },
     ],
   };
@@ -178,14 +177,12 @@ function formatBahrainTime(timestamp) {
   const bahrainDate = new Date(
     date.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
   );
-  return (
-    bahrainDate.toLocaleTimeString("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: true,
-    }) + " AST"
-  );
+  return bahrainDate.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
 }
 
 function formatBahrainDateTime(timestamp) {
@@ -193,17 +190,15 @@ function formatBahrainDateTime(timestamp) {
   const bahrainDate = new Date(
     date.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
   );
-  return (
-    bahrainDate.toLocaleString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-      timeZone: "Asia/Bahrain",
-    }) + " AST"
-  );
+  return bahrainDate.toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Bahrain",
+  });
 }
 
 // ==================== NOTIFICATION LOGIC ====================

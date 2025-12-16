@@ -63,6 +63,7 @@ let lastPresenceNotificationTime = 0;
 let lastMessageNotificationTime = 0;
 const PRESENCE_COOLDOWN = 5000; // 5 seconds
 const MESSAGE_COOLDOWN = 10000; // 10 seconds
+let jarifActivityStatus = "offline"; // "online" or "offline" based on visibleAndFocused
 
 // ==================== HELPER FUNCTIONS ====================
 async function sendDiscordNotification(
@@ -201,7 +202,7 @@ function formatBahrainDateTime(timestamp) {
   });
 }
 
-// ==================== NOTIFICATION LOGIC ====================
+// ==================== FIXED NOTIFICATION LOGIC ====================
 async function checkMessageForNotification(message) {
   // 1. Only messages from Fi to Jarif
   if (message.sender !== USER_FIDHA) {
@@ -259,36 +260,53 @@ async function checkMessageForNotification(message) {
     return;
   }
 
-  // 6. Check Jarif's online status at the time of the message
-  let jarifWasOnlineAtMessageTime = false;
+  // 6. CRITICAL FIX: Check Jarif's ACTUAL ACTIVITY STATUS, not just online presence
+  // We need to check if Jarif is "active" (visibleAndFocused: true) or just "online"
+  let jarifIsActiveAtMessageTime = false;
   try {
+    // Get Jarif's presence data at the time of message
     const presenceSnap = await db
       .ref(`ephemeral/presence/${USER_JARIF}`)
       .once("value");
     const jarifPresence = presenceSnap.val();
-    if (jarifPresence && jarifPresence.lastSeen) {
+
+    if (jarifPresence) {
+      // Check if Jarif was actually active (not just online)
+      // visibleAndFocused = true means browser tab is active and focused
+      // If visibleAndFocused is false or undefined, Jarif is inactive
+      const jarifWasVisibleAndFocused =
+        jarifPresence.visibleAndFocused === true;
+
+      // Also check if Jarif was recently active (within last 30 seconds)
       const messageTime = message.timestampFull || Date.now();
-      const timeDifference = Math.abs(jarifPresence.lastSeen - messageTime);
-      jarifWasOnlineAtMessageTime = timeDifference < 30000; // 30 seconds
-      console.log("👤 Jarif presence check:", {
+      const timeSinceLastSeen = Math.abs(jarifPresence.lastSeen - messageTime);
+
+      // Jarif is considered active if:
+      // 1. visibleAndFocused is true AND
+      // 2. lastSeen was within 30 seconds of message time
+      jarifIsActiveAtMessageTime =
+        jarifWasVisibleAndFocused && timeSinceLastSeen < 30000;
+
+      console.log("👤 Jarif activity check:", {
+        visibleAndFocused: jarifWasVisibleAndFocused,
         lastSeen: formatBahrainDateTime(jarifPresence.lastSeen),
         messageTime: formatBahrainDateTime(messageTime),
-        difference: Math.round(timeDifference / 1000) + "s",
-        wasOnline: jarifWasOnlineAtMessageTime,
+        timeSinceLastSeen: Math.round(timeSinceLastSeen / 1000) + "s",
+        isActive: jarifIsActiveAtMessageTime,
       });
     }
   } catch (error) {
-    console.error("❌ Error checking Jarif presence for message:", error);
+    console.error("❌ Error checking Jarif activity for message:", error);
   }
 
-  // 7. DECISION: Send notification only if Jarif was OFFLINE at message time
-  if (jarifWasOnlineAtMessageTime) {
+  // 7. DECISION: Send notification ONLY if Jarif was INACTIVE at message time
+  if (jarifIsActiveAtMessageTime) {
     console.log(
-      "⏭️ Skipping - Jarif was online around the time the message was sent."
+      "⏭️ Skipping - Jarif was active (visible and focused) when the message was sent."
     );
   } else {
     console.log(
-      "🚨 SENDING NOTIFICATION - Jarif was offline when Fi sent a message."
+      "🚨 SENDING NOTIFICATION - Jarif was inactive when Fi sent a message."
     );
     await sendDiscordNotification(
       `<@765280345260032030>`, // Your Discord user ID
@@ -305,7 +323,7 @@ async function checkMessageForNotification(message) {
   }
 }
 
-async function checkActivityForNotification(isActive, lastSeen) {
+async function checkActivityForNotification(isActive, presenceData) {
   // 1. Get Jarif's notification settings
   let jarifSettings;
   try {
@@ -327,7 +345,9 @@ async function checkActivityForNotification(isActive, lastSeen) {
   console.log("👁️ Fi Activity Check:", {
     wasOnline,
     nowOnline,
-    lastSeen: lastSeen ? formatBahrainDateTime(lastSeen) : "null",
+    lastSeen: presenceData?.lastSeen
+      ? formatBahrainDateTime(presenceData.lastSeen)
+      : "null",
     activityNotificationsEnabled: jarifSettings
       ? jarifSettings.activityNotifications
       : false,
@@ -410,7 +430,6 @@ function startFirebaseListeners() {
     try {
       const val = snapshot.val();
       const isActive = val ? val.online : false;
-      const lastSeen = val ? val.lastSeen : null;
 
       // Skip if state hasn't changed
       if (lastFiPresenceState === isActive) {
@@ -418,22 +437,35 @@ function startFirebaseListeners() {
       }
 
       lastFiPresenceState = isActive;
-      checkActivityForNotification(isActive, lastSeen);
+      checkActivityForNotification(isActive, val);
     } catch (error) {
       console.error("❌ Error in presence listener:", error);
     }
   });
 
-  // LISTENER 3: Jarif's Presence (to track his online state for message logic)
+  // LISTENER 3: Jarif's Presence (to track his activity status)
   db.ref("ephemeral/presence/Jarif").on("value", (snapshot) => {
     try {
       const val = snapshot.val();
       jarifIsCurrentlyOnline = val ? val.online : false;
+
+      // Update activity status based on visibleAndFocused
+      if (val && val.visibleAndFocused === true) {
+        jarifActivityStatus = "active";
+      } else if (val && val.online) {
+        jarifActivityStatus = "online";
+      } else {
+        jarifActivityStatus = "offline";
+      }
+
       if (val && val.lastSeen) {
         jarifLastOnlineTime = val.lastSeen;
       }
+
       console.log("👤 Jarif presence updated:", {
         online: jarifIsCurrentlyOnline,
+        activityStatus: jarifActivityStatus,
+        visibleAndFocused: val?.visibleAndFocused || false,
         lastSeen: jarifLastOnlineTime
           ? formatBahrainDateTime(jarifLastOnlineTime)
           : "null",

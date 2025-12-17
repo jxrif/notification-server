@@ -61,8 +61,10 @@ let processedMessageIds = new Set();
 let processedPresenceEvents = new Set();
 let lastPresenceNotificationTime = 0;
 let lastMessageNotificationTime = 0;
+let lastLoginNotificationTime = 0;
 const PRESENCE_COOLDOWN = 5000; // 5 seconds
 const MESSAGE_COOLDOWN = 10000; // 10 seconds
+const LOGIN_COOLDOWN = 5000; // 5 seconds cooldown for login notifications
 let jarifActivityStatus = "offline"; // "online" or "offline" based on visibleAndFocused
 
 // ==================== HELPER FUNCTIONS ====================
@@ -70,7 +72,8 @@ async function sendDiscordNotification(
   mention,
   embedDescription,
   isActivity = false,
-  isOffline = false
+  isOffline = false,
+  isLogin = false
 ) {
   if (!DISCORD_WEBHOOK_URL) {
     console.log("Discord webhook not configured.");
@@ -88,7 +91,7 @@ async function sendDiscordNotification(
   }
 
   // Check cooldown for message notifications
-  if (!isActivity && !isOffline) {
+  if (!isActivity && !isOffline && !isLogin) {
     const now = Date.now();
     if (now - lastMessageNotificationTime < MESSAGE_COOLDOWN) {
       console.log("⏭️ Skipping message notification - cooldown active");
@@ -97,9 +100,25 @@ async function sendDiscordNotification(
     lastMessageNotificationTime = now;
   }
 
+  // Check cooldown for login notifications
+  if (isLogin) {
+    const now = Date.now();
+    if (now - lastLoginNotificationTime < LOGIN_COOLDOWN) {
+      console.log("⏭️ Skipping login notification - cooldown active");
+      return;
+    }
+    lastLoginNotificationTime = now;
+  }
+
   // Create event key for deduplication
   const eventKey = `${
-    isActivity ? "activity" : isOffline ? "offline" : "message"
+    isActivity
+      ? "activity"
+      : isOffline
+      ? "offline"
+      : isLogin
+      ? "login"
+      : "message"
   }_${Date.now()}`;
   if (processedPresenceEvents.has(eventKey)) {
     console.log("⏭️ Skipping duplicate event:", eventKey);
@@ -130,14 +149,27 @@ async function sendDiscordNotification(
     ? `Came online at ${currentTime}`
     : isOffline
     ? `Went offline at ${currentTime}`
+    : isLogin
+    ? `Accessed at ${currentTime}`
     : `Sent at ${currentTime}`;
+
+  let color;
+  if (isActivity) {
+    color = 3066993; // Green
+  } else if (isOffline) {
+    color = 15158332; // Red
+  } else if (isLogin) {
+    color = 16776960; // Yellow
+  } else {
+    color = 3447003; // Blue
+  }
 
   const webhookBody = {
     content: mention,
     embeds: [
       {
         description: embedDescription,
-        color: isActivity ? 3066993 : isOffline ? 15158332 : 3447003,
+        color: color,
         footer: { text: footerText },
       },
     ],
@@ -312,7 +344,8 @@ async function checkMessageForNotification(message) {
       `<@765280345260032030>`, // Your Discord user ID
       `\`Fi✨ sent a message\``,
       false, // isActivity
-      false // isOffline
+      false, // isOffline
+      false // isLogin
     );
     processedMessageIds.add(message.id);
     // Clean up old IDs to prevent memory growth
@@ -368,7 +401,8 @@ async function checkActivityForNotification(isActive, presenceData) {
       `<@765280345260032030>`,
       `\`Fi✨ is no longer active\``,
       false, // isActivity
-      true // isOffline
+      true, // isOffline
+      false // isLogin
     );
   }
   // 3. Check for "came online" notification
@@ -383,18 +417,109 @@ async function checkActivityForNotification(isActive, presenceData) {
       `<@765280345260032030>`,
       `\`Fi✨ is now active\``,
       true, // isActivity
-      false // isOffline
+      false, // isOffline
+      false // isLogin
     );
   }
 
   previousFiOnlineState = nowOnline;
 }
 
+// ==================== LOGIN PAGE ACCESS NOTIFICATION ====================
+async function checkLoginPageAccess(loginData) {
+  try {
+    const userId = loginData.userId || "Unknown user";
+    const timestamp = loginData.timestamp || Date.now();
+    const bahrainTime = formatBahrainDateTime(timestamp);
+
+    console.log(`🔓 Login page accessed by: ${userId} at ${bahrainTime}`);
+
+    // Send Discord notification for login access
+    await sendDiscordNotification(
+      `<@765280345260032030>`, // Your Discord user ID
+      `\`🔓 Login page was opened\`\n**User:** ${userId}\n**Time:** ${bahrainTime}\n**Device:** ${
+        loginData.userAgent || "Unknown"
+      }`,
+      false, // isActivity
+      false, // isOffline
+      true // isLogin
+    );
+
+    console.log(`✅ Login notification sent for user: ${userId}`);
+  } catch (error) {
+    console.error("❌ Error processing login access:", error);
+  }
+}
+
 // ==================== START LISTENERS ====================
 function startFirebaseListeners() {
   console.log("🚀 Starting Firebase listeners...");
 
-  // LISTENER 1: New Messages
+  // NEW LISTENER 1: Login Page Access Tracking
+  const loginAccessRef = db.ref("ephemeral/loginAccess");
+  let processedLoginIds = new Set();
+
+  loginAccessRef.on("child_added", async (snapshot) => {
+    try {
+      const loginData = snapshot.val();
+      if (!loginData) return;
+
+      const loginId = snapshot.key;
+
+      // Skip if already processed
+      if (processedLoginIds.has(loginId)) {
+        snapshot.ref.remove().catch(() => {});
+        return;
+      }
+
+      // Process the login notification
+      await checkLoginPageAccess(loginData);
+
+      // Mark as processed
+      processedLoginIds.add(loginId);
+
+      // Clean up old processed IDs
+      if (processedLoginIds.size > 100) {
+        const arr = Array.from(processedLoginIds);
+        processedLoginIds = new Set(arr.slice(-50));
+      }
+
+      // Remove the record after processing (with delay to ensure it's processed)
+      setTimeout(() => {
+        snapshot.ref.remove().catch(() => {
+          console.log("✅ Cleaned up login access record:", loginId);
+        });
+      }, 1000);
+    } catch (error) {
+      console.error("❌ Error in login access listener:", error);
+    }
+  });
+
+  // Clean up orphaned login records periodically
+  setInterval(async () => {
+    try {
+      const snapshot = await loginAccessRef.once("value");
+      const records = snapshot.val();
+      if (!records) return;
+
+      const now = Date.now();
+      const fiveMinutesAgo = now - 5 * 60 * 1000;
+
+      Object.keys(records).forEach((key) => {
+        const record = records[key];
+        if (record.timestamp && record.timestamp < fiveMinutesAgo) {
+          loginAccessRef
+            .child(key)
+            .remove()
+            .catch(() => {});
+        }
+      });
+    } catch (error) {
+      console.error("❌ Error cleaning up old login records:", error);
+    }
+  }, 300000); // Every 5 minutes
+
+  // LISTENER 2: New Messages
   const messagesRef = db.ref("ephemeral/messages");
   messagesRef
     .orderByChild("timestampFull")
@@ -424,7 +549,7 @@ function startFirebaseListeners() {
       }
     });
 
-  // LISTENER 2: Fi's Presence (Online/Offline)
+  // LISTENER 3: Fi's Presence (Online/Offline)
   let lastFiPresenceState = null;
   db.ref("ephemeral/presence/Fidha").on("value", (snapshot) => {
     try {
@@ -443,7 +568,7 @@ function startFirebaseListeners() {
     }
   });
 
-  // LISTENER 3: Jarif's Presence (to track his activity status)
+  // LISTENER 4: Jarif's Presence (to track his activity status)
   db.ref("ephemeral/presence/Jarif").on("value", (snapshot) => {
     try {
       const val = snapshot.val();
@@ -475,7 +600,9 @@ function startFirebaseListeners() {
     }
   });
 
-  console.log("✅ All Firebase listeners are active.");
+  console.log(
+    "✅ All Firebase listeners are active (including login tracking)."
+  );
 }
 
 // ==================== START SERVER ====================
@@ -505,4 +632,14 @@ process.on("SIGTERM", () => {
 process.on("SIGINT", () => {
   console.log("🛑 SIGINT received. Shutting down gracefully...");
   process.exit(0);
+});
+
+// ==================== ERROR HANDLING ====================
+process.on("uncaughtException", (error) => {
+  console.error("🔥 Uncaught Exception:", error);
+  // Don't exit, let the server try to recover
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("🔥 Unhandled Rejection at:", promise, "reason:", reason);
 });

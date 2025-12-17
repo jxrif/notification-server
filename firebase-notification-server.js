@@ -34,7 +34,9 @@ try {
 }
 
 // Use environment variable or fallback to your hardcoded webhook
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+const DISCORD_WEBHOOK_URL =
+  process.env.DISCORD_WEBHOOK_URL ||
+  "https://discord.com/api/webhooks/1306603388033040454/xv7s6tO12dfaup68kf1ZzOj-33wVRWvJxGew6YpZ9cl9arAjYufgLh2a_KxAn0Jz3L_E";
 
 const USER_FIDHA = "Fidha"; // Decoded from your base64
 const USER_JARIF = "Jarif"; // Decoded from your base64

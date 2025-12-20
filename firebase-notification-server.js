@@ -317,7 +317,7 @@ async function checkMessageForNotification(message) {
       // 1. visibleAndFocused is true AND
       // 2. lastSeen was within 30 seconds of message time
       jarifIsActiveAtMessageTime =
-        jarifWasVisibleAndFocused && timeSinceLastSeen < 30000;
+        jarifWasVisibleAndFocused && timeSinceLastSeen < 3000;
 
       console.log("👤 Jarif activity check:", {
         visibleAndFocused: jarifWasVisibleAndFocused,
@@ -643,3 +643,4 @@ process.on("uncaughtException", (error) => {
 process.on("unhandledRejection", (reason, promise) => {
   console.error("🔥 Unhandled Rejection at:", promise, "reason:", reason);
 });
+

@@ -130,15 +130,24 @@ async function sendDiscordNotification(
     processedPresenceEvents = new Set(arr.slice(-50));
   }
 
-  const bahrainTime = getBahrainTime();
+  const now = new Date();
+  const bahrainTime = new Date(
+    now.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
+  );
+  const formattedTime = bahrainTime.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
 
   const footerText = isActivity
-    ? `Came online at ${bahrainTime.time} AST`
+    ? `Came online at ${formattedTime} AST`
     : isOffline
-    ? `Went offline at ${bahrainTime.time} AST`
+    ? `Went offline at ${formattedTime} AST`
     : isLogin
-    ? `Accessed at ${bahrainTime.time} AST`
-    : `Sent at ${bahrainTime.time} AST`;
+    ? `Accessed at ${formattedTime} AST`
+    : `Sent at ${formattedTime} AST`;
 
   let color;
   if (isActivity) {
@@ -157,8 +166,7 @@ async function sendDiscordNotification(
       {
         description: embedDescription,
         color: color,
-        footer: { text: footerText },
-        timestamp: new Date().toISOString(),
+        footer: footerText ? { text: footerText } : undefined,
       },
     ],
   };
@@ -324,14 +332,23 @@ async function checkLoginPageAccess(loginData) {
     const platform = loginData.platform || "Unknown";
     const timezone = loginData.timezone || "Unknown";
 
-    const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenSize}\n**Timezone:** ${timezone}`;
+    const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenSize}`;
+
+    const bahrainNow = new Date().toLocaleString("en-US", {
+      timeZone: "Asia/Bahrain",
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    });
 
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent.substring(
-        0,
-        100
-      )}...\n**Time:** ${bahrainTime}`,
+      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainNow} AST`,
       false,
       false,
       true

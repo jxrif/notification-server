@@ -332,7 +332,13 @@ async function checkLoginPageAccess(loginData) {
     const platform = loginData.platform || "Unknown";
     const timezone = loginData.timezone || "Unknown";
 
-    const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenSize}`;
+    // Usage in an async context (no try/catch here)
+    const d = await getDeviceInfo();
+
+    // prefer the physicalResolution (entire device) — this will NOT change if user resizes browser window
+    const screenLabel = `${d.physicalResolution} (physical pixels) — ${d.logicalResolution} (CSS pixels)`;
+
+    const deviceInfo = `**Device ID:** ${d.deviceId}\n**Model:** ${d.deviceModel} (${d.deviceType})\n**Platform:** ${d.platform}\n**Screen:** ${screenLabel}`;
 
     const bahrainNow = new Date().toLocaleString("en-US", {
       timeZone: "Asia/Bahrain",
@@ -348,7 +354,7 @@ async function checkLoginPageAccess(loginData) {
 
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainNow} AST`,
+      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${d.userAgent}\n**Time:** ${bahrainNow} AST`,
       false,
       false,
       true

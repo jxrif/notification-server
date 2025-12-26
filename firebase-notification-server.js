@@ -24,6 +24,10 @@ const DISCORD_WEBHOOK_URL =
   process.env.DISCORD_WEBHOOK_URL ||
   "https://discord.com/api/webhooks/1306603388033040454/xv7s6tO12dfaup68kf1ZzOj-33wVRWvJxGew6YpZ9cl9arAjYufgLh2a_KxAn0Jz3L_E";
 
+const JARIF_WEBHOOK_URL =
+  process.env.JARIF_WEBHOOK_URL ||
+  "https://discord.com/api/webhooks/1306603388033040454/xv7s6tO12dfaup68kf1ZzOj-33wVRWvJxGew6YpZ9cl9arAjYufgLh2a_KxAn0Jz3L_E"; // Replace with your Jarif webhook URL
+
 const USER_FIDHA = "Fidha";
 const USER_JARIF = "Jarif";
 
@@ -35,9 +39,11 @@ const db = admin.database();
 
 let jarifLastOnlineTime = Date.now();
 let jarifIsCurrentlyOnline = false;
+let jarifIsActuallyOffline = true; // Track if Jarif is actually offline
 let previousFiOnlineState = false;
 let processedMessageIds = new Set();
 let processedPresenceEvents = new Set();
+let processedJarifLoginIds = new Set();
 let lastPresenceNotificationTime = 0;
 let lastMessageNotificationTime = 0;
 let lastLoginNotificationTime = 0;
@@ -79,11 +85,13 @@ function getBahrainTime() {
 async function sendDiscordNotification(
   mention,
   embedDescription,
+  webhookUrl = DISCORD_WEBHOOK_URL,
   isActivity = false,
   isOffline = false,
-  isLogin = false
+  isLogin = false,
+  isJarifLogin = false
 ) {
-  if (!DISCORD_WEBHOOK_URL) {
+  if (!webhookUrl) {
     return;
   }
 
@@ -95,7 +103,7 @@ async function sendDiscordNotification(
     lastPresenceNotificationTime = now;
   }
 
-  if (!isActivity && !isOffline && !isLogin) {
+  if (!isActivity && !isOffline && !isLogin && !isJarifLogin) {
     const now = Date.now();
     if (now - lastMessageNotificationTime < MESSAGE_COOLDOWN) {
       return;
@@ -103,7 +111,7 @@ async function sendDiscordNotification(
     lastMessageNotificationTime = now;
   }
 
-  if (isLogin) {
+  if (isLogin || isJarifLogin) {
     const now = Date.now();
     if (now - lastLoginNotificationTime < LOGIN_COOLDOWN) {
       return;
@@ -118,6 +126,8 @@ async function sendDiscordNotification(
       ? "offline"
       : isLogin
       ? "login"
+      : isJarifLogin
+      ? "jarif_login"
       : "message"
   }_${Date.now()}`;
   if (processedPresenceEvents.has(eventKey)) {
@@ -147,17 +157,21 @@ async function sendDiscordNotification(
     ? `Went offline at ${formattedTime} AST`
     : isLogin
     ? `Accessed at ${formattedTime} AST`
+    : isJarifLogin
+    ? `Logged in at ${formattedTime} AST`
     : `Sent at ${formattedTime} AST`;
 
   let color;
   if (isActivity) {
-    color = 3066993;
+    color = 3066993; // Green
   } else if (isOffline) {
-    color = 15158332;
+    color = 15158332; // Red
   } else if (isLogin) {
-    color = 16776960;
+    color = 16776960; // Yellow
+  } else if (isJarifLogin) {
+    color = 3447003; // Blue
   } else {
-    color = 3447003;
+    color = 10181046; // Purple
   }
 
   const webhookBody = {
@@ -167,12 +181,13 @@ async function sendDiscordNotification(
         description: embedDescription,
         color: color,
         footer: footerText ? { text: footerText } : undefined,
+        timestamp: new Date().toISOString(),
       },
     ],
   };
 
   try {
-    const response = await fetch(DISCORD_WEBHOOK_URL, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(webhookBody),
@@ -202,9 +217,41 @@ function formatBahrainDateTime(timestamp) {
   });
 }
 
+async function checkJarifPresence() {
+  try {
+    const presenceSnap = await db
+      .ref(`ephemeral/presence/${USER_JARIF}`)
+      .once("value");
+    const jarifPresence = presenceSnap.val();
+
+    if (!jarifPresence) {
+      jarifIsActuallyOffline = true;
+      return;
+    }
+
+    // Check if Jarif is actually offline (not just unfocused)
+    const isOnline = jarifPresence.online === true;
+    const lastSeen = jarifPresence.lastSeen || 0;
+    const timeSinceLastSeen = Date.now() - lastSeen;
+
+    // Consider Jarif offline if:
+    // 1. online is false OR
+    // 2. last seen was more than 30 seconds ago
+    jarifIsActuallyOffline = !isOnline || timeSinceLastSeen > 30000;
+  } catch (error) {
+    jarifIsActuallyOffline = true;
+  }
+}
+
 async function checkMessageForNotification(message) {
   if (message.sender !== USER_FIDHA) {
     return;
+  }
+
+  // Check if Jarif is actually offline
+  await checkJarifPresence();
+  if (!jarifIsActuallyOffline) {
+    return; // Don't send notification if Jarif is online
   }
 
   const bahrainTime = formatBahrainDateTime(
@@ -237,43 +284,31 @@ async function checkMessageForNotification(message) {
     return;
   }
 
-  let jarifIsActiveAtMessageTime = false;
-  try {
-    const presenceSnap = await db
-      .ref(`ephemeral/presence/${USER_JARIF}`)
-      .once("value");
-    const jarifPresence = presenceSnap.val();
+  await sendDiscordNotification(
+    `<@765280345260032030>`,
+    `\`Fi✨ sent a message\`\n\n**Message:** ${
+      message.text || "Attachment"
+    }\n**Time:** ${bahrainTime}`,
+    DISCORD_WEBHOOK_URL,
+    false,
+    false,
+    false
+  );
+  processedMessageIds.add(message.id);
 
-    if (jarifPresence) {
-      const jarifWasVisibleAndFocused =
-        jarifPresence.visibleAndFocused === true;
-
-      const messageTime = message.timestampFull || Date.now();
-      const timeSinceLastSeen = Math.abs(jarifPresence.lastSeen - messageTime);
-
-      jarifIsActiveAtMessageTime =
-        jarifWasVisibleAndFocused && timeSinceLastSeen < 3000;
-    }
-  } catch (error) {}
-
-  if (jarifIsActiveAtMessageTime) {
-  } else {
-    await sendDiscordNotification(
-      `<@765280345260032030>`,
-      `\`Fi✨ sent a message\``,
-      false,
-      false,
-      false
-    );
-    processedMessageIds.add(message.id);
-    if (processedMessageIds.size > 1000) {
-      const arr = Array.from(processedMessageIds);
-      processedMessageIds = new Set(arr.slice(-500));
-    }
+  if (processedMessageIds.size > 1000) {
+    const arr = Array.from(processedMessageIds);
+    processedMessageIds = new Set(arr.slice(-500));
   }
 }
 
 async function checkActivityForNotification(isActive, presenceData) {
+  // Check if Jarif is actually offline
+  await checkJarifPresence();
+  if (!jarifIsActuallyOffline) {
+    return; // Don't send notification if Jarif is online
+  }
+
   let jarifSettings;
   try {
     const settingsSnap = await db
@@ -286,6 +321,7 @@ async function checkActivityForNotification(isActive, presenceData) {
 
   const wasOnline = previousFiOnlineState;
   const nowOnline = isActive;
+  const bahrainTime = formatBahrainDateTime(Date.now());
 
   if (
     wasOnline &&
@@ -295,7 +331,8 @@ async function checkActivityForNotification(isActive, presenceData) {
   ) {
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`Fi✨ is no longer active\``,
+      `\`Fi✨ is no longer active\`\n\n**Time:** ${bahrainTime}`,
+      DISCORD_WEBHOOK_URL,
       false,
       true,
       false
@@ -308,7 +345,8 @@ async function checkActivityForNotification(isActive, presenceData) {
   ) {
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`Fi✨ is now active\``,
+      `\`Fi✨ is now active\`\n\n**Time:** ${bahrainTime}`,
+      DISCORD_WEBHOOK_URL,
       true,
       false,
       false
@@ -318,9 +356,66 @@ async function checkActivityForNotification(isActive, presenceData) {
   previousFiOnlineState = nowOnline;
 }
 
+async function checkJarifLoginForNotification(loginData) {
+  if (
+    !JARIF_WEBHOOK_URL ||
+    JARIF_WEBHOOK_URL === "YOUR_JARIF_WEBHOOK_URL_HERE"
+  ) {
+    return;
+  }
+
+  if (processedJarifLoginIds.has(loginData.id)) {
+    return;
+  }
+
+  const deviceInfo = loginData.deviceInfo || {};
+  const bahrainTime = formatBahrainDateTime(loginData.timestamp || Date.now());
+
+  let deviceDetails = `**Device Model:** ${
+    deviceInfo.deviceModel || "Unknown"
+  }\n`;
+  deviceDetails += `**Device Type:** ${deviceInfo.deviceType || "Unknown"}\n`;
+  deviceDetails += `**Platform:** ${deviceInfo.platform || "Unknown"}\n`;
+  deviceDetails += `**Screen:** ${deviceInfo.screenSize || "Unknown"}\n`;
+  deviceDetails += `**Device ID:** ${
+    deviceInfo.deviceId
+      ? deviceInfo.deviceId.substring(0, 16) + "..."
+      : "Unknown"
+  }\n`;
+  deviceDetails += `**Timezone:** ${deviceInfo.timezone || "Unknown"}\n`;
+  deviceDetails += `**Browser:** ${
+    deviceInfo.userAgent
+      ? deviceInfo.userAgent.substring(0, 100) + "..."
+      : "Unknown"
+  }`;
+
+  await sendDiscordNotification(
+    `<@765280345260032030>`,
+    `\`Jarif is now active\`\n\n${deviceDetails}\n\n**Login Time:** ${bahrainTime}`,
+    JARIF_WEBHOOK_URL,
+    false,
+    false,
+    false,
+    true
+  );
+
+  processedJarifLoginIds.add(loginData.id);
+
+  if (processedJarifLoginIds.size > 100) {
+    const arr = Array.from(processedJarifLoginIds);
+    processedJarifLoginIds = new Set(arr.slice(-50));
+  }
+}
+
 async function checkLoginPageAccess(loginData) {
   try {
     const userId = loginData.userId || "Unknown user";
+
+    // Only send notification for 7uvfii logins
+    if (userId === USER_JARIF) {
+      return;
+    }
+
     const timestamp = loginData.timestamp || Date.now();
     const bahrainTime = formatBahrainDateTime(timestamp);
 
@@ -334,21 +429,13 @@ async function checkLoginPageAccess(loginData) {
 
     const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenSize}`;
 
-    const bahrainNow = new Date().toLocaleString("en-US", {
-      timeZone: "Asia/Bahrain",
-      weekday: "short",
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: true,
-    });
-
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainNow} AST`,
+      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent.substring(
+        0,
+        100
+      )}...\n**Time:** ${bahrainTime} AST`,
+      DISCORD_WEBHOOK_URL,
       false,
       false,
       true
@@ -358,8 +445,26 @@ async function checkLoginPageAccess(loginData) {
 
 function startFirebaseListeners() {
   const loginAccessRef = db.ref("ephemeral/loginAccess");
+  const jarifLoginRef = db.ref("ephemeral/jarifLogins");
   let processedLoginIds = new Set();
 
+  // Listen for Jarif logins
+  jarifLoginRef.on("child_added", async (snapshot) => {
+    try {
+      const loginData = snapshot.val();
+      if (!loginData) return;
+
+      loginData.id = snapshot.key;
+      await checkJarifLoginForNotification(loginData);
+
+      // Remove old login records
+      setTimeout(() => {
+        snapshot.ref.remove().catch(() => {});
+      }, 60000); // Remove after 1 minute
+    } catch (error) {}
+  });
+
+  // Listen for all login attempts
   loginAccessRef.on("child_added", async (snapshot) => {
     try {
       const loginData = snapshot.val();
@@ -387,6 +492,7 @@ function startFirebaseListeners() {
     } catch (error) {}
   });
 
+  // Clean up old login records
   setInterval(async () => {
     try {
       const snapshot = await loginAccessRef.once("value");
@@ -408,6 +514,7 @@ function startFirebaseListeners() {
     } catch (error) {}
   }, 300000);
 
+  // Listen for new messages
   const messagesRef = db.ref("ephemeral/messages");
   messagesRef
     .orderByChild("timestampFull")
@@ -430,6 +537,7 @@ function startFirebaseListeners() {
       } catch (error) {}
     });
 
+  // Listen for Fi's presence changes
   let lastFiPresenceState = null;
   db.ref("ephemeral/presence/Fidha").on("value", (snapshot) => {
     try {
@@ -445,6 +553,7 @@ function startFirebaseListeners() {
     } catch (error) {}
   });
 
+  // Listen for Jarif's presence changes
   db.ref("ephemeral/presence/Jarif").on("value", (snapshot) => {
     try {
       const val = snapshot.val();
@@ -452,14 +561,27 @@ function startFirebaseListeners() {
 
       if (val && val.visibleAndFocused === true) {
         jarifActivityStatus = "active";
+        jarifIsActuallyOffline = false;
       } else if (val && val.online) {
         jarifActivityStatus = "online";
+        jarifIsActuallyOffline = false;
       } else {
         jarifActivityStatus = "offline";
+        jarifIsActuallyOffline = true;
       }
 
       if (val && val.lastSeen) {
         jarifLastOnlineTime = val.lastSeen;
+      }
+    } catch (error) {}
+  });
+
+  // Listen for blocked devices
+  const blockedDevicesRef = db.ref("ephemeral/blockedDevices");
+  blockedDevicesRef.on("child_added", (snapshot) => {
+    try {
+      const blockedDevice = snapshot.val();
+      if (blockedDevice && blockedDevice.deviceId) {
       }
     } catch (error) {}
   });

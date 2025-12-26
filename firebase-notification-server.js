@@ -318,48 +318,102 @@ async function checkActivityForNotification(isActive, presenceData) {
   previousFiOnlineState = nowOnline;
 }
 
-async function checkLoginPageAccess(loginData) {
+async function checkLoginPageAccess(loginData = {}) {
+  // Normalize incoming values (safe defaults)
+  const userId = loginData.userId || "Unknown user";
+  const timestamp = loginData.timestamp || Date.now();
+
+  // formatBahrainDateTime fallback (in case it's not defined)
+  const bahrainTime =
+    typeof formatBahrainDateTime === "function"
+      ? formatBahrainDateTime(timestamp)
+      : new Date(timestamp).toLocaleString("en-US", {
+          timeZone: "Asia/Bahrain",
+          weekday: "short",
+          year: "numeric",
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: true,
+        });
+
+  // Attempt to get accurate device info; fall back to loginData or sensible defaults
+  const d = await getDeviceInfo().catch((err) => {
+    console.warn("getDeviceInfo failed, using loginData fallback:", err);
+    return {
+      deviceId: loginData.deviceId || "Unknown device",
+      deviceModel: loginData.deviceModel || "Unknown",
+      deviceType: loginData.deviceType || "Unknown",
+      userAgent:
+        loginData.userAgent ||
+        (typeof navigator !== "undefined" ? navigator.userAgent : "Unknown"),
+      physicalResolution:
+        loginData.screenSize || loginData.physicalResolution || "Unknown",
+      logicalResolution:
+        loginData.deviceScreen || loginData.logicalResolution || "Unknown",
+      platform:
+        loginData.platform ||
+        (typeof navigator !== "undefined" ? navigator.platform : "Unknown"),
+    };
+  });
+
+  // Build stable screen info (use physicalResolution if available)
+  const screenLabel = `${
+    d.physicalResolution || "Unknown"
+  } (physical pixels) — ${d.logicalResolution || "Unknown"} (CSS pixels)`;
+
+  const deviceInfo = `**Device ID:** ${d.deviceId}\n**Model:** ${d.deviceModel} (${d.deviceType})\n**Platform:** ${d.platform}\n**Screen:** ${screenLabel}`;
+
+  // Human-friendly Bahrain timestamp (guaranteed)
+  const bahrainNow = new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Bahrain",
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+
+  // Build content payload (string). If your sendDiscordNotification expects a shaped object,
+  // change this call to match its signature (I kept the simple args you used earlier).
+  const content = `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${d.userAgent}\n**Time:** ${bahrainNow} AST`;
+
   try {
-    const userId = loginData.userId || "Unknown user";
-    const timestamp = loginData.timestamp || Date.now();
-    const bahrainTime = formatBahrainDateTime(timestamp);
-
-    const deviceId = loginData.deviceId || "Unknown device";
-    const deviceModel = loginData.deviceModel || "Unknown";
-    const deviceType = loginData.deviceType || "Unknown";
-    const userAgent = loginData.userAgent || "Unknown";
-    const screenSize = loginData.screenSize || "Unknown";
-    const platform = loginData.platform || "Unknown";
-    const timezone = loginData.timezone || "Unknown";
-
-    // Usage in an async context (no try/catch here)
-    const d = await getDeviceInfo();
-
-    // prefer the physicalResolution (entire device) — this will NOT change if user resizes browser window
-    const screenLabel = `${d.physicalResolution} (physical pixels) — ${d.logicalResolution} (CSS pixels)`;
-
-    const deviceInfo = `**Device ID:** ${d.deviceId}\n**Model:** ${d.deviceModel} (${d.deviceType})\n**Platform:** ${d.platform}\n**Screen:** ${screenLabel}`;
-
-    const bahrainNow = new Date().toLocaleString("en-US", {
-      timeZone: "Asia/Bahrain",
-      weekday: "short",
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: true,
-    });
-
+    // Primary attempt: embed-enabled call (keeps same arg order as your previous examples)
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${d.userAgent}\n**Time:** ${bahrainNow} AST`,
+      content,
       false,
       false,
       true
     );
-  } catch (error) {}
+    console.log("Discord notification (embed) sent successfully.");
+  } catch (err) {
+    // If the main send failed, log why and attempt a minimal fallback so you still get alerted
+    console.error("Primary sendDiscordNotification failed:", err);
+
+    // Fallback: simple text notification (no embed)
+    try {
+      await sendDiscordNotification(
+        `<@765280345260032030>`,
+        `Fallback alert — Login page opened for user ${userId} at ${bahrainNow} AST`,
+        false,
+        false,
+        false
+      );
+      console.log("Fallback Discord notification sent.");
+    } catch (fallbackErr) {
+      // If fallback also fails, surface the error so the caller / logs can catch it
+      console.error("Fallback notification also failed:", fallbackErr);
+      // Re-throw so upstream code knows something went wrong (optional)
+      throw fallbackErr;
+    }
+  }
 }
 
 function startFirebaseListeners() {

@@ -318,101 +318,82 @@ async function checkActivityForNotification(isActive, presenceData) {
   previousFiOnlineState = nowOnline;
 }
 
-async function checkLoginPageAccess(loginData = {}) {
-  // Normalize incoming values (safe defaults)
-  const userId = loginData.userId || "Unknown user";
-  const timestamp = loginData.timestamp || Date.now();
-
-  // formatBahrainDateTime fallback (in case it's not defined)
-  const bahrainTime =
-    typeof formatBahrainDateTime === "function"
-      ? formatBahrainDateTime(timestamp)
-      : new Date(timestamp).toLocaleString("en-US", {
-          timeZone: "Asia/Bahrain",
-          weekday: "short",
-          year: "numeric",
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-          hour12: true,
-        });
-
-  // Attempt to get accurate device info; fall back to loginData or sensible defaults
-  const d = await getDeviceInfo().catch((err) => {
-    console.warn("getDeviceInfo failed, using loginData fallback:", err);
-    return {
-      deviceId: loginData.deviceId || "Unknown device",
-      deviceModel: loginData.deviceModel || "Unknown",
-      deviceType: loginData.deviceType || "Unknown",
-      userAgent:
-        loginData.userAgent ||
-        (typeof navigator !== "undefined" ? navigator.userAgent : "Unknown"),
-      physicalResolution:
-        loginData.screenSize || loginData.physicalResolution || "Unknown",
-      logicalResolution:
-        loginData.deviceScreen || loginData.logicalResolution || "Unknown",
-      platform:
-        loginData.platform ||
-        (typeof navigator !== "undefined" ? navigator.platform : "Unknown"),
-    };
-  });
-
-  // Build stable screen info (use physicalResolution if available)
-  const screenLabel = `${
-    d.physicalResolution || "Unknown"
-  } (physical pixels) — ${d.logicalResolution || "Unknown"} (CSS pixels)`;
-
-  const deviceInfo = `**Device ID:** ${d.deviceId}\n**Model:** ${d.deviceModel} (${d.deviceType})\n**Platform:** ${d.platform}\n**Screen:** ${screenLabel}`;
-
-  // Human-friendly Bahrain timestamp (guaranteed)
-  const bahrainNow = new Date().toLocaleString("en-US", {
-    timeZone: "Asia/Bahrain",
-    weekday: "short",
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  });
-
-  // Build content payload (string). If your sendDiscordNotification expects a shaped object,
-  // change this call to match its signature (I kept the simple args you used earlier).
-  const content = `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${d.userAgent}\n**Time:** ${bahrainNow} AST`;
-
+async function checkLoginPageAccess(loginData) {
   try {
-    // Primary attempt: embed-enabled call (keeps same arg order as your previous examples)
+    const userId = loginData.userId || "Unknown user";
+    const timestamp = loginData.timestamp || Date.now();
+
+    // Format Bahrain time (unchanged)
+    const bahrainNow = new Date(timestamp).toLocaleString("en-US", {
+      timeZone: "Asia/Bahrain",
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    });
+
+    // Helper: build a stable "Screen" string that prefers physical pixels from actualScreen
+    function formatScreenFromPayload(payload) {
+      // 1) Prefer actualScreen.physicalWidth/physicalHeight (best)
+      if (payload.actualScreen && typeof payload.actualScreen === "object") {
+        const s = payload.actualScreen;
+        if (s.physicalWidth && s.physicalHeight) {
+          // show both physical px and logical px for clarity
+          const physical = `${s.physicalWidth}x${s.physicalHeight}`;
+          const logical =
+            s.logicalWidth && s.logicalHeight
+              ? `${s.logicalWidth}x${s.logicalHeight}`
+              : `${s.width || payload.deviceScreen || "?"}x${s.height || ""}`;
+          return `${physical} (physical px) / ${logical} (CSS px)`;
+        }
+        // fallback to avail/width fields
+        if (s.width && s.height) {
+          return `${s.width}x${s.height} (screen.width/height)`;
+        }
+      }
+
+      // 2) Fallback to explicit physicalResolution field
+      if (payload.physicalResolution) {
+        return `${payload.physicalResolution} (physical px)`;
+      }
+
+      // 3) Fallback to deviceScreen (logical)
+      if (payload.deviceScreen) {
+        return `${payload.deviceScreen} (CSS px)`;
+      }
+
+      // 4) Last resort: viewport (not ideal, but at least present)
+      if (payload.viewportSize) {
+        return `${payload.viewportSize} (viewport — may change with window)`;
+      }
+
+      return "Unknown";
+    }
+
+    const deviceId = loginData.deviceId || "Unknown device";
+    const deviceModel = loginData.deviceModel || "Unknown";
+    const deviceType = loginData.deviceType || "Unknown";
+    const platform = loginData.platform || "Unknown";
+    const screenString = formatScreenFromPayload(loginData);
+
+    const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenString}`;
+
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      content,
+      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${
+        loginData.userAgent || "Unknown"
+      }\n**Time:** ${bahrainNow} AST`,
       false,
       false,
       true
     );
-    console.log("Discord notification (embed) sent successfully.");
-  } catch (err) {
-    // If the main send failed, log why and attempt a minimal fallback so you still get alerted
-    console.error("Primary sendDiscordNotification failed:", err);
-
-    // Fallback: simple text notification (no embed)
-    try {
-      await sendDiscordNotification(
-        `<@765280345260032030>`,
-        `Fallback alert — Login page opened for user ${userId} at ${bahrainNow} AST`,
-        false,
-        false,
-        false
-      );
-      console.log("Fallback Discord notification sent.");
-    } catch (fallbackErr) {
-      // If fallback also fails, surface the error so the caller / logs can catch it
-      console.error("Fallback notification also failed:", fallbackErr);
-      // Re-throw so upstream code knows something went wrong (optional)
-      throw fallbackErr;
-    }
+  } catch (error) {
+    // keep previous silent behavior, optionally log
+    console.error("checkLoginPageAccess error:", error);
   }
 }
 

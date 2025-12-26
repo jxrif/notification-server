@@ -26,7 +26,11 @@ const DISCORD_WEBHOOK_URL =
 
 const JARIF_WEBHOOK_URL =
   process.env.JARIF_WEBHOOK_URL ||
-  "https://discord.com/api/webhooks/1306603388033040454/xv7s6tO12dfaup68kf1ZzOj-33wVRWvJxGew6YpZ9cl9arAjYufgLh2a_KxAn0Jz3L_E"; // Replace with your Jarif webhook URL
+  "https://discord.com/api/webhooks/1306603388033040454/xv7s6tO12dfaup68kf1ZzOj-33wVRWvJxGew6YpZ9cl9arAjYufgLh2a_KxAn0Jz3L_E";
+
+const PRELOGIN_WEBHOOK_URL =
+  process.env.PRELOGIN_WEBHOOK_URL ||
+  "https://discord.com/api/webhooks/1306603388033040454/xv7s6tO12dfaup68kf1ZzOj-33wVRWvJxGew6YpZ9cl9arAjYufgLh2a_KxAn0Jz3L_E"; // New webhook for pre-login notifications
 
 const USER_FIDHA = "Fidha";
 const USER_JARIF = "Jarif";
@@ -39,7 +43,7 @@ const db = admin.database();
 
 let jarifLastOnlineTime = Date.now();
 let jarifIsCurrentlyOnline = false;
-let jarifIsActuallyOffline = true; // Track if Jarif is actually offline
+let jarifIsActuallyOffline = true;
 let previousFiOnlineState = false;
 let processedMessageIds = new Set();
 let processedPresenceEvents = new Set();
@@ -163,15 +167,15 @@ async function sendDiscordNotification(
 
   let color;
   if (isActivity) {
-    color = 3066993; // Green
+    color = 3066993;
   } else if (isOffline) {
-    color = 15158332; // Red
+    color = 15158332;
   } else if (isLogin) {
-    color = 16776960; // Yellow
+    color = 16776960;
   } else if (isJarifLogin) {
-    color = 3447003; // Blue
+    color = 3447003;
   } else {
-    color = 10181046; // Purple
+    color = 10181046;
   }
 
   const webhookBody = {
@@ -181,13 +185,71 @@ async function sendDiscordNotification(
         description: embedDescription,
         color: color,
         footer: footerText ? { text: footerText } : undefined,
-        timestamp: new Date().toISOString(),
       },
     ],
   };
 
   try {
     const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(webhookBody),
+      timeout: 5000,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+    }
+  } catch (error) {}
+}
+
+// New function specifically for pre-login notifications
+async function sendPreLoginNotification(mention, embedDescription) {
+  if (!PRELOGIN_WEBHOOK_URL) {
+    return; // Don't send if no webhook URL is configured
+  }
+
+  const now = Date.now();
+  if (now - lastLoginNotificationTime < LOGIN_COOLDOWN) {
+    return;
+  }
+  lastLoginNotificationTime = now;
+
+  const eventKey = `prelogin_${Date.now()}`;
+  if (processedPresenceEvents.has(eventKey)) {
+    return;
+  }
+  processedPresenceEvents.add(eventKey);
+
+  if (processedPresenceEvents.size > 100) {
+    const arr = Array.from(processedPresenceEvents);
+    processedPresenceEvents = new Set(arr.slice(-50));
+  }
+
+  const currentTime = new Date();
+  const bahrainTime = new Date(
+    currentTime.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
+  );
+  const formattedTime = bahrainTime.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+
+  const webhookBody = {
+    content: mention,
+    embeds: [
+      {
+        description: embedDescription,
+        color: 16776960, // Yellow color for pre-login notifications
+        footer: { text: `Accessed at ${formattedTime} AST` },
+      },
+    ],
+  };
+
+  try {
+    const response = await fetch(PRELOGIN_WEBHOOK_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(webhookBody),
@@ -229,14 +291,10 @@ async function checkJarifPresence() {
       return;
     }
 
-    // Check if Jarif is actually offline (not just unfocused)
     const isOnline = jarifPresence.online === true;
     const lastSeen = jarifPresence.lastSeen || 0;
     const timeSinceLastSeen = Date.now() - lastSeen;
 
-    // Consider Jarif offline if:
-    // 1. online is false OR
-    // 2. last seen was more than 30 seconds ago
     jarifIsActuallyOffline = !isOnline || timeSinceLastSeen > 30000;
   } catch (error) {
     jarifIsActuallyOffline = true;
@@ -248,10 +306,9 @@ async function checkMessageForNotification(message) {
     return;
   }
 
-  // Check if Jarif is actually offline
   await checkJarifPresence();
   if (!jarifIsActuallyOffline) {
-    return; // Don't send notification if Jarif is online
+    return;
   }
 
   const bahrainTime = formatBahrainDateTime(
@@ -303,10 +360,9 @@ async function checkMessageForNotification(message) {
 }
 
 async function checkActivityForNotification(isActive, presenceData) {
-  // Check if Jarif is actually offline
   await checkJarifPresence();
   if (!jarifIsActuallyOffline) {
-    return; // Don't send notification if Jarif is online
+    return;
   }
 
   let jarifSettings;
@@ -378,15 +434,11 @@ async function checkJarifLoginForNotification(loginData) {
   deviceDetails += `**Platform:** ${deviceInfo.platform || "Unknown"}\n`;
   deviceDetails += `**Screen:** ${deviceInfo.screenSize || "Unknown"}\n`;
   deviceDetails += `**Device ID:** ${
-    deviceInfo.deviceId
-      ? deviceInfo.deviceId.substring(0, 16) + "..."
-      : "Unknown"
+    deviceInfo.deviceId ? deviceInfo.deviceId : "Unknown"
   }\n`;
   deviceDetails += `**Timezone:** ${deviceInfo.timezone || "Unknown"}\n`;
   deviceDetails += `**Browser:** ${
-    deviceInfo.userAgent
-      ? deviceInfo.userAgent.substring(0, 100) + "..."
-      : "Unknown"
+    deviceInfo.userAgent ? deviceInfo.userAgent : "Unknown"
   }`;
 
   await sendDiscordNotification(
@@ -429,16 +481,10 @@ async function checkLoginPageAccess(loginData) {
 
     const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenSize}`;
 
-    await sendDiscordNotification(
+    // Use the new pre-login webhook instead of the main webhook
+    await sendPreLoginNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent.substring(
-        0,
-        100
-      )}...\n**Time:** ${bahrainTime} AST`,
-      DISCORD_WEBHOOK_URL,
-      false,
-      false,
-      true
+      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainTime} AST`
     );
   } catch (error) {}
 }
@@ -457,10 +503,9 @@ function startFirebaseListeners() {
       loginData.id = snapshot.key;
       await checkJarifLoginForNotification(loginData);
 
-      // Remove old login records
       setTimeout(() => {
         snapshot.ref.remove().catch(() => {});
-      }, 60000); // Remove after 1 minute
+      }, 60000);
     } catch (error) {}
   });
 

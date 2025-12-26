@@ -322,8 +322,19 @@ async function checkLoginPageAccess(loginData) {
   try {
     const userId = loginData.userId || "Unknown user";
     const timestamp = loginData.timestamp || Date.now();
+    const bahrainTime = formatBahrainDateTime(timestamp);
 
-    const bahrainNow = new Date(timestamp).toLocaleString("en-US", {
+    const deviceId = loginData.deviceId || "Unknown device";
+    const deviceModel = loginData.deviceModel || "Unknown";
+    const deviceType = loginData.deviceType || "Unknown";
+    const userAgent = loginData.userAgent || "Unknown";
+    const screenSize = loginData.screenSize || "Unknown";
+    const platform = loginData.platform || "Unknown";
+    const timezone = loginData.timezone || "Unknown";
+
+    const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenSize}`;
+
+    const bahrainNow = new Date().toLocaleString("en-US", {
       timeZone: "Asia/Bahrain",
       weekday: "short",
       year: "numeric",
@@ -335,120 +346,14 @@ async function checkLoginPageAccess(loginData) {
       hour12: true,
     });
 
-    // Helper: try many places to find a physical resolution (best-first).
-    function formatScreenFromPayload(payload) {
-      if (!payload || typeof payload !== "object") return "Unknown";
-
-      const s = payload.actualScreen || {};
-
-      // 1) actualScreen.physicalWidth/height (explicit numeric)
-      if (
-        typeof s.physicalWidth === "number" &&
-        s.physicalWidth > 0 &&
-        typeof s.physicalHeight === "number" &&
-        s.physicalHeight > 0
-      ) {
-        const physical = `${s.physicalWidth}x${s.physicalHeight}`;
-        const logical =
-          s.logicalWidth && s.logicalHeight
-            ? `${s.logicalWidth}x${s.logicalHeight}`
-            : payload.deviceScreen || "unknown";
-        return `${physical} (physical px) / ${logical} (CSS px)`;
-      }
-
-      // 2) physicalResolution string (e.g. "1080x2400")
-      if (
-        payload.physicalResolution &&
-        typeof payload.physicalResolution === "string" &&
-        payload.physicalResolution.includes("x")
-      ) {
-        return `${payload.physicalResolution} (physical px)`;
-      }
-
-      // 3) actualScreen.width/height fallback
-      if (
-        typeof s.width === "number" &&
-        s.width > 0 &&
-        typeof s.height === "number" &&
-        s.height > 0
-      ) {
-        const logical = `${s.width}x${s.height}`;
-        // try to compute approximate physical using pixelRatio if provided
-        if (typeof s.pixelRatio === "number" && s.pixelRatio > 0) {
-          const physW = Math.round(s.width * s.pixelRatio);
-          const physH = Math.round(s.height * s.pixelRatio);
-          return `${physW}x${physH} (approx physical px) / ${logical} (CSS px)`;
-        }
-        return `${logical} (screen.width/height - maybe CSS px)`;
-      }
-
-      // 4) deviceScreen (logical) if present
-      if (
-        payload.deviceScreen &&
-        typeof payload.deviceScreen === "string" &&
-        payload.deviceScreen.includes("x")
-      ) {
-        return `${payload.deviceScreen} (CSS px)`;
-      }
-
-      // 5) viewport last resort
-      if (payload.viewportSize) {
-        return `${payload.viewportSize} (viewport — may change with window)`;
-      }
-
-      // 6) Nothing useful — provide a short debug snippet but don't spam entire payload
-      try {
-        const short = JSON.stringify({
-          physicalResolution: payload.physicalResolution,
-          actualScreen: payload.actualScreen && {
-            physicalWidth: payload.actualScreen.physicalWidth,
-            physicalHeight: payload.actualScreen.physicalHeight,
-            pixelRatio: payload.actualScreen.pixelRatio,
-            width: payload.actualScreen.width,
-            height: payload.actualScreen.height,
-          },
-          deviceScreen: payload.deviceScreen,
-          viewportSize: payload.viewportSize,
-        });
-        // if everything is null/undefined, it will be "{}" — still useful
-        return `Unknown (debug: ${short})`;
-      } catch (e) {
-        return "Unknown";
-      }
-    }
-
-    const deviceId = loginData.deviceId || "Unknown device";
-    const deviceModel = loginData.deviceModel || "Unknown";
-    const deviceType = loginData.deviceType || "Unknown";
-    const platform = loginData.platform || "Unknown";
-    const screenString = formatScreenFromPayload(loginData);
-
-    // Log the raw (short) payload server-side for debugging (only if needed)
-    console.debug("loginData (short):", {
-      deviceId,
-      physicalResolution: loginData.physicalResolution,
-      actualScreen: loginData.actualScreen && {
-        physicalWidth: loginData.actualScreen.physicalWidth,
-        physicalHeight: loginData.actualScreen.physicalHeight,
-        pixelRatio: loginData.actualScreen.pixelRatio,
-      },
-      viewportSize: loginData.viewportSize,
-    });
-
-    const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenString}`;
-
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${
-        loginData.userAgent || "Unknown"
-      }\n**Time:** ${bahrainNow} AST`,
+      `\`🔓 Login page was opened\`\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainNow} AST`,
       false,
       false,
       true
     );
-  } catch (error) {
-    console.error("checkLoginPageAccess error:", error);
-  }
+  } catch (error) {}
 }
 
 function startFirebaseListeners() {

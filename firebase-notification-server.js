@@ -323,7 +323,6 @@ async function checkLoginPageAccess(loginData) {
     const userId = loginData.userId || "Unknown user";
     const timestamp = loginData.timestamp || Date.now();
 
-    // Format Bahrain time (unchanged)
     const bahrainNow = new Date(timestamp).toLocaleString("en-US", {
       timeZone: "Asia/Bahrain",
       weekday: "short",
@@ -336,42 +335,86 @@ async function checkLoginPageAccess(loginData) {
       hour12: true,
     });
 
-    // Helper: build a stable "Screen" string that prefers physical pixels from actualScreen
+    // Helper: try many places to find a physical resolution (best-first).
     function formatScreenFromPayload(payload) {
-      // 1) Prefer actualScreen.physicalWidth/physicalHeight (best)
-      if (payload.actualScreen && typeof payload.actualScreen === "object") {
-        const s = payload.actualScreen;
-        if (s.physicalWidth && s.physicalHeight) {
-          // show both physical px and logical px for clarity
-          const physical = `${s.physicalWidth}x${s.physicalHeight}`;
-          const logical =
-            s.logicalWidth && s.logicalHeight
-              ? `${s.logicalWidth}x${s.logicalHeight}`
-              : `${s.width || payload.deviceScreen || "?"}x${s.height || ""}`;
-          return `${physical} (physical px) / ${logical} (CSS px)`;
-        }
-        // fallback to avail/width fields
-        if (s.width && s.height) {
-          return `${s.width}x${s.height} (screen.width/height)`;
-        }
+      if (!payload || typeof payload !== "object") return "Unknown";
+
+      const s = payload.actualScreen || {};
+
+      // 1) actualScreen.physicalWidth/height (explicit numeric)
+      if (
+        typeof s.physicalWidth === "number" &&
+        s.physicalWidth > 0 &&
+        typeof s.physicalHeight === "number" &&
+        s.physicalHeight > 0
+      ) {
+        const physical = `${s.physicalWidth}x${s.physicalHeight}`;
+        const logical =
+          s.logicalWidth && s.logicalHeight
+            ? `${s.logicalWidth}x${s.logicalHeight}`
+            : payload.deviceScreen || "unknown";
+        return `${physical} (physical px) / ${logical} (CSS px)`;
       }
 
-      // 2) Fallback to explicit physicalResolution field
-      if (payload.physicalResolution) {
+      // 2) physicalResolution string (e.g. "1080x2400")
+      if (
+        payload.physicalResolution &&
+        typeof payload.physicalResolution === "string" &&
+        payload.physicalResolution.includes("x")
+      ) {
         return `${payload.physicalResolution} (physical px)`;
       }
 
-      // 3) Fallback to deviceScreen (logical)
-      if (payload.deviceScreen) {
+      // 3) actualScreen.width/height fallback
+      if (
+        typeof s.width === "number" &&
+        s.width > 0 &&
+        typeof s.height === "number" &&
+        s.height > 0
+      ) {
+        const logical = `${s.width}x${s.height}`;
+        // try to compute approximate physical using pixelRatio if provided
+        if (typeof s.pixelRatio === "number" && s.pixelRatio > 0) {
+          const physW = Math.round(s.width * s.pixelRatio);
+          const physH = Math.round(s.height * s.pixelRatio);
+          return `${physW}x${physH} (approx physical px) / ${logical} (CSS px)`;
+        }
+        return `${logical} (screen.width/height - maybe CSS px)`;
+      }
+
+      // 4) deviceScreen (logical) if present
+      if (
+        payload.deviceScreen &&
+        typeof payload.deviceScreen === "string" &&
+        payload.deviceScreen.includes("x")
+      ) {
         return `${payload.deviceScreen} (CSS px)`;
       }
 
-      // 4) Last resort: viewport (not ideal, but at least present)
+      // 5) viewport last resort
       if (payload.viewportSize) {
         return `${payload.viewportSize} (viewport — may change with window)`;
       }
 
-      return "Unknown";
+      // 6) Nothing useful — provide a short debug snippet but don't spam entire payload
+      try {
+        const short = JSON.stringify({
+          physicalResolution: payload.physicalResolution,
+          actualScreen: payload.actualScreen && {
+            physicalWidth: payload.actualScreen.physicalWidth,
+            physicalHeight: payload.actualScreen.physicalHeight,
+            pixelRatio: payload.actualScreen.pixelRatio,
+            width: payload.actualScreen.width,
+            height: payload.actualScreen.height,
+          },
+          deviceScreen: payload.deviceScreen,
+          viewportSize: payload.viewportSize,
+        });
+        // if everything is null/undefined, it will be "{}" — still useful
+        return `Unknown (debug: ${short})`;
+      } catch (e) {
+        return "Unknown";
+      }
     }
 
     const deviceId = loginData.deviceId || "Unknown device";
@@ -379,6 +422,18 @@ async function checkLoginPageAccess(loginData) {
     const deviceType = loginData.deviceType || "Unknown";
     const platform = loginData.platform || "Unknown";
     const screenString = formatScreenFromPayload(loginData);
+
+    // Log the raw (short) payload server-side for debugging (only if needed)
+    console.debug("loginData (short):", {
+      deviceId,
+      physicalResolution: loginData.physicalResolution,
+      actualScreen: loginData.actualScreen && {
+        physicalWidth: loginData.actualScreen.physicalWidth,
+        physicalHeight: loginData.actualScreen.physicalHeight,
+        pixelRatio: loginData.actualScreen.pixelRatio,
+      },
+      viewportSize: loginData.viewportSize,
+    });
 
     const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenString}`;
 
@@ -392,7 +447,6 @@ async function checkLoginPageAccess(loginData) {
       true
     );
   } catch (error) {
-    // keep previous silent behavior, optionally log
     console.error("checkLoginPageAccess error:", error);
   }
 }

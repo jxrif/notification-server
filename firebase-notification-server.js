@@ -358,7 +358,7 @@ async function checkActivityForNotification(isActive, presenceData) {
 async function checkJarifLoginForNotification(loginData) {
   if (
     !JARIF_WEBHOOK_URL ||
-    JARIF_WEBHOOK_URL === process.env.JARIF_WEBHOOK_URL
+    JARIF_WEBHOOK_URL === "YOUR_JARIF_WEBHOOK_URL_HERE"
   ) {
     return;
   }
@@ -377,11 +377,15 @@ async function checkJarifLoginForNotification(loginData) {
   deviceDetails += `**Platform:** ${deviceInfo.platform || "Unknown"}\n`;
   deviceDetails += `**Screen:** ${deviceInfo.screenSize || "Unknown"}\n`;
   deviceDetails += `**Device ID:** ${
-    deviceInfo.deviceId ? deviceInfo.deviceId : "Unknown"
+    deviceInfo.deviceId
+      ? deviceInfo.deviceId
+      : "Unknown"
   }\n`;
   deviceDetails += `**Timezone:** ${deviceInfo.timezone || "Unknown"}\n`;
   deviceDetails += `**Browser:** ${
-    deviceInfo.userAgent ? deviceInfo.userAgent : "Unknown"
+    deviceInfo.userAgent
+      ? deviceInfo.userAgent
+      : "Unknown"
   }`;
 
   await sendDiscordNotification(

@@ -583,19 +583,12 @@ function startFirebaseListeners() {
       const val = snapshot.val();
       jarifIsCurrentlyOnline = val ? val.online : false;
 
-      if (val) {
-        const now = Date.now();
-        const lastHeartbeat = val.heartbeat || 0;
-        const isActuallyOnline =
-          val.online === true && now - lastHeartbeat < 10000;
-
-        if (isActuallyOnline) {
-          jarifActivityStatus = "online";
-          jarifIsActuallyOffline = false;
-        } else {
-          jarifActivityStatus = "offline";
-          jarifIsActuallyOffline = true;
-        }
+      if (val && val.visibleAndFocused === true) {
+        jarifActivityStatus = "active";
+        jarifIsActuallyOffline = false;
+      } else if (val && val.online) {
+        jarifActivityStatus = "online";
+        jarifIsActuallyOffline = false;
       } else {
         jarifActivityStatus = "offline";
         jarifIsActuallyOffline = true;
@@ -604,9 +597,7 @@ function startFirebaseListeners() {
       if (val && val.lastSeen) {
         jarifLastOnlineTime = val.lastSeen;
       }
-    } catch (error) {
-      console.error("Error processing Jarif presence:", error);
-    }
+    } catch (error) {}
   });
 
   // Clean up old data periodically

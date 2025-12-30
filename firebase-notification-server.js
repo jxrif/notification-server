@@ -200,10 +200,22 @@ async function sendDiscordNotification(
 }
 
 function formatBahrainDateTime(timestamp) {
-  // Ensure timestamp is in milliseconds
-  const ts = timestamp < 2_000_000_000_000 ? timestamp * 1000 : timestamp;
+  // fallback to now if no timestamp provided
+  if (timestamp == null) timestamp = Date.now();
 
-  const formatter = new Intl.DateTimeFormat("en-US", {
+  // Normalize string numeric timestamps
+  if (typeof timestamp === "string" && /^\d+$/.test(timestamp)) {
+    timestamp = Number(timestamp);
+  }
+
+  // If timestamp looks like seconds (e.g. 10-digit), convert to ms
+  if (typeof timestamp === "number" && timestamp < 1e12) {
+    timestamp = timestamp * 1000;
+  }
+
+  const d = new Date(Number(timestamp));
+
+  const options = {
     timeZone: "Asia/Bahrain",
     year: "numeric",
     month: "short",
@@ -212,9 +224,13 @@ function formatBahrainDateTime(timestamp) {
     minute: "2-digit",
     second: "2-digit",
     hour12: true,
-  });
+  };
 
-  return formatter.format(new Date(ts));
+  // Use toLocaleString with timeZone directly (no intermediate Date parsing)
+  const formatted = d.toLocaleString("en-US", options);
+
+  // Explicitly mention West Riffa, Bahrain so it's crystal clear
+  return `${formatted} (West Riffa, Bahrain)`;
 }
 
 async function checkJarifPresence() {
@@ -369,10 +385,7 @@ async function checkJarifLoginForNotification(loginData) {
   }
 
   const deviceInfo = loginData.deviceInfo || {};
-  // Use Bahrain timestamp if available
-  const timestamp =
-    loginData.timestampBahrain || loginData.timestamp || Date.now();
-  const bahrainTime = formatBahrainDateTime(timestamp);
+  const bahrainTime = formatBahrainDateTime(loginData.timestamp || Date.now());
 
   let deviceDetails = `**Device Model:** ${
     deviceInfo.deviceModel || "Unknown"
@@ -386,7 +399,7 @@ async function checkJarifLoginForNotification(loginData) {
   }\n`;
   deviceDetails += `**Timezone:** ${deviceInfo.timezone || "Unknown"}\n`;
   deviceDetails += `**Browser:** ${
-    deviceInfo.userAgent ? deviceInfo.userAgent : "Unknown"
+    deviceInfo.userAgent ? deviceInfo.userAgent.substring(0, 100) : "Unknown"
   }`;
 
   await sendDiscordNotification(
@@ -412,13 +425,11 @@ async function checkLoginPageAccess(loginData) {
     const userId = loginData.userId || "Unknown user";
 
     // Only send notification for 7uvfii logins
-    if (userId === USER_JARIF) {
+    if (userId === USER_JARIF || userId.includes(USER_JARIF)) {
       return;
     }
 
-    // Use Bahrain timestamp if available
-    const timestamp =
-      loginData.timestampBahrain || loginData.timestamp || Date.now();
+    const timestamp = loginData.timestamp || Date.now();
     const bahrainTime = formatBahrainDateTime(timestamp);
 
     const deviceId = loginData.deviceId || "Unknown device";
@@ -434,7 +445,10 @@ async function checkLoginPageAccess(loginData) {
 
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainTime}`,
+      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent.substring(
+        0,
+        100
+      )}...\n**Time:** ${bahrainTime} AST`,
       DISCORD_WEBHOOK_URL,
       false,
       false,

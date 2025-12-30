@@ -5,6 +5,12 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Validate required environment variables
+if (!process.env.DISCORD_WEBHOOK_URL) {
+  console.error("ERROR: DISCORD_WEBHOOK_URL environment variable is required.");
+  process.exit(1);
+}
+
 app.get("/", (req, res) => res.send("Notification Server is running."));
 app.get("/health", (req, res) => res.send("OK"));
 
@@ -20,13 +26,9 @@ try {
   process.exit(1);
 }
 
-const DISCORD_WEBHOOK_URL =
-  process.env.DISCORD_WEBHOOK_URL ||
-  "https://discord.com/api/webhooks/1306603388033040454/xv7s6tO12dfaup68kf1ZzOj-33wVRWvJxGew6YpZ9cl9arAjYufgLh2a_KxAn0Jz3L_E";
-
-const JARIF_WEBHOOK_URL =
-  process.env.JARIF_WEBHOOK_URL ||
-  "https://discord.com/api/webhooks/1306603388033040454/xv7s6tO12dfaup68kf1ZzOj-33wVRWvJxGew6YpZ9cl9arAjYufgLh2a_KxAn0Jz3L_E";
+// Webhook URLs from environment variables only
+const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+const JARIF_WEBHOOK_URL = process.env.JARIF_WEBHOOK_URL; // Optional: only for Jarif login notifications
 
 const USER_FIDHA = "Fidha";
 const USER_JARIF = "Jarif";
@@ -57,6 +59,20 @@ function formatBahrainTime(timestamp = Date.now()) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
+  });
+}
+
+function formatBahrainDateTime(timestamp = Date.now()) {
+  const now = new Date(Number(timestamp));
+  return now.toLocaleString("en-US", {
+    timeZone: "Asia/Bahrain",
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
   });
 }
 
@@ -167,8 +183,11 @@ async function sendDiscordNotification(
 
     if (!response.ok) {
       const text = await response.text();
+      console.error(`Discord webhook error: ${response.status} - ${text}`);
     }
-  } catch (error) {}
+  } catch (error) {
+    console.error(`Failed to send Discord notification: ${error.message}`);
+  }
 }
 
 async function checkJarifPresence() {
@@ -203,7 +222,9 @@ async function checkMessageForNotification(message) {
     return;
   }
 
-  const bahrainTime = formatBahrainTime(message.timestampFull || Date.now());
+  const bahrainDateTime = formatBahrainDateTime(
+    message.timestampFull || Date.now()
+  );
 
   if (processedMessageIds.has(message.id)) {
     return;
@@ -235,7 +256,7 @@ async function checkMessageForNotification(message) {
     `<@765280345260032030>`,
     `\`Fi✨ sent a message\`\n\n**Message:** ${
       message.text || "Attachment"
-    }\n**Time:** ${bahrainTime}`,
+    }\n**Time:** ${bahrainDateTime}`,
     DISCORD_WEBHOOK_URL
   );
   processedMessageIds.add(message.id);
@@ -264,7 +285,7 @@ async function checkActivityForNotification(isActive) {
 
   const wasOnline = previousFiOnlineState;
   const nowOnline = isActive;
-  const bahrainTime = formatBahrainTime();
+  const bahrainDateTime = formatBahrainDateTime();
 
   if (
     wasOnline &&
@@ -274,7 +295,7 @@ async function checkActivityForNotification(isActive) {
   ) {
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`Fi✨ is no longer active\`\n\n**Time:** ${bahrainTime}`,
+      `\`Fi✨ is no longer active\`\n\n**Time:** ${bahrainDateTime}`,
       DISCORD_WEBHOOK_URL,
       false,
       true
@@ -287,7 +308,7 @@ async function checkActivityForNotification(isActive) {
   ) {
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`Fi✨ is now active\`\n\n**Time:** ${bahrainTime}`,
+      `\`Fi✨ is now active\`\n\n**Time:** ${bahrainDateTime}`,
       DISCORD_WEBHOOK_URL,
       true
     );
@@ -297,10 +318,7 @@ async function checkActivityForNotification(isActive) {
 }
 
 async function checkJarifLoginForNotification(loginData) {
-  if (
-    !JARIF_WEBHOOK_URL ||
-    JARIF_WEBHOOK_URL === "YOUR_JARIF_WEBHOOK_URL_HERE"
-  ) {
+  if (!JARIF_WEBHOOK_URL) {
     return;
   }
 
@@ -309,7 +327,9 @@ async function checkJarifLoginForNotification(loginData) {
   }
 
   const deviceInfo = loginData.deviceInfo || {};
-  const bahrainTime = formatBahrainTime(loginData.timestamp || Date.now());
+  const bahrainDateTime = formatBahrainDateTime(
+    loginData.timestamp || Date.now()
+  );
 
   let deviceDetails = `**Device Model:** ${
     deviceInfo.deviceModel || "Unknown"
@@ -328,7 +348,7 @@ async function checkJarifLoginForNotification(loginData) {
 
   await sendDiscordNotification(
     `<@765280345260032030>`,
-    `\`Jarif is now active\`\n\n${deviceDetails}\n\n**Login Time:** ${bahrainTime}`,
+    `\`Jarif is now active\`\n\n${deviceDetails}\n\n**Login Time:** ${bahrainDateTime}`,
     JARIF_WEBHOOK_URL,
     false,
     false,
@@ -353,7 +373,7 @@ async function checkLoginPageAccess(loginData) {
     }
 
     const timestamp = loginData.timestamp || Date.now();
-    const bahrainTime = formatBahrainTime(timestamp);
+    const bahrainDateTime = formatBahrainDateTime(timestamp);
 
     const deviceId = loginData.deviceId || "Unknown device";
     const deviceModel = loginData.deviceModel || "Unknown";
@@ -368,13 +388,15 @@ async function checkLoginPageAccess(loginData) {
 
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainTime}`,
+      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainDateTime}`,
       DISCORD_WEBHOOK_URL,
       false,
       false,
       true
     );
-  } catch (error) {}
+  } catch (error) {
+    console.error(`Error checking login page access: ${error.message}`);
+  }
 }
 
 function startFirebaseListeners() {
@@ -393,7 +415,9 @@ function startFirebaseListeners() {
       setTimeout(() => {
         snapshot.ref.remove().catch(() => {});
       }, 60000);
-    } catch (error) {}
+    } catch (error) {
+      console.error(`Error processing Jarif login: ${error.message}`);
+    }
   });
 
   loginAccessRef.on("child_added", async (snapshot) => {
@@ -420,7 +444,9 @@ function startFirebaseListeners() {
       setTimeout(() => {
         snapshot.ref.remove().catch(() => {});
       }, 1000);
-    } catch (error) {}
+    } catch (error) {
+      console.error(`Error processing login access: ${error.message}`);
+    }
   });
 
   setInterval(async () => {
@@ -441,7 +467,9 @@ function startFirebaseListeners() {
             .catch(() => {});
         }
       });
-    } catch (error) {}
+    } catch (error) {
+      console.error(`Error cleaning old login records: ${error.message}`);
+    }
   }, 300000);
 
   const messagesRef = db.ref("ephemeral/messages");
@@ -463,7 +491,9 @@ function startFirebaseListeners() {
         }
 
         await checkMessageForNotification(message);
-      } catch (error) {}
+      } catch (error) {
+        console.error(`Error processing message: ${error.message}`);
+      }
     });
 
   let lastFiPresenceState = null;
@@ -478,7 +508,9 @@ function startFirebaseListeners() {
 
       lastFiPresenceState = isActive;
       checkActivityForNotification(isActive);
-    } catch (error) {}
+    } catch (error) {
+      console.error(`Error processing Fi presence: ${error.message}`);
+    }
   });
 
   db.ref("ephemeral/presence/Jarif").on("value", (snapshot) => {
@@ -493,7 +525,9 @@ function startFirebaseListeners() {
       } else {
         jarifIsActuallyOffline = true;
       }
-    } catch (error) {}
+    } catch (error) {
+      console.error(`Error processing Jarif presence: ${error.message}`);
+    }
   });
 
   const blockedDevicesRef = db.ref("ephemeral/blockedDevices");
@@ -501,24 +535,35 @@ function startFirebaseListeners() {
     try {
       const blockedDevice = snapshot.val();
       if (blockedDevice && blockedDevice.deviceId) {
+        console.log(`Device blocked: ${blockedDevice.deviceId}`);
       }
-    } catch (error) {}
+    } catch (error) {
+      console.error(`Error processing blocked device: ${error.message}`);
+    }
   });
 }
 
 startFirebaseListeners();
 app.listen(PORT, () => {
+  const bahrainDateTime = formatBahrainDateTime();
   console.log(`Notification Server is running on port ${PORT}`);
+  console.log(`Server started at: ${bahrainDateTime} (Bahrain Time)`);
 });
 
 process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down gracefully");
   process.exit(0);
 });
 
 process.on("SIGINT", () => {
+  console.log("SIGINT received, shutting down gracefully");
   process.exit(0);
 });
 
-process.on("uncaughtException", (error) => {});
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error);
+});
 
-process.on("unhandledRejection", (reason, promise) => {});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+});

@@ -200,11 +200,10 @@ async function sendDiscordNotification(
 }
 
 function formatBahrainDateTime(timestamp) {
-  const date = new Date(timestamp);
-  const bahrainDate = new Date(
-    date.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
-  );
-  return bahrainDate.toLocaleString("en-US", {
+  // Ensure timestamp is in milliseconds
+  const ts = timestamp < 2_000_000_000_000 ? timestamp * 1000 : timestamp;
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Bahrain",
     year: "numeric",
     month: "short",
@@ -214,6 +213,8 @@ function formatBahrainDateTime(timestamp) {
     second: "2-digit",
     hour12: true,
   });
+
+  return formatter.format(new Date(ts));
 }
 
 async function checkJarifPresence() {
@@ -385,7 +386,7 @@ async function checkJarifLoginForNotification(loginData) {
   }\n`;
   deviceDetails += `**Timezone:** ${deviceInfo.timezone || "Unknown"}\n`;
   deviceDetails += `**Browser:** ${
-    deviceInfo.userAgent ? deviceInfo.userAgent.substring(0, 100) : "Unknown"
+    deviceInfo.userAgent ? deviceInfo.userAgent : "Unknown"
   }`;
 
   await sendDiscordNotification(
@@ -433,10 +434,7 @@ async function checkLoginPageAccess(loginData) {
 
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent.substring(
-        0,
-        100
-      )}\n**Time:** ${bahrainTime}`,
+      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainTime}`,
       DISCORD_WEBHOOK_URL,
       false,
       false,

@@ -205,6 +205,7 @@ function formatBahrainDateTime(timestamp) {
     date.toLocaleString("en-US", { timeZone: "Asia/Bahrain" })
   );
   return bahrainDate.toLocaleString("en-US", {
+    timeZone: "Asia/Bahrain",
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -212,7 +213,6 @@ function formatBahrainDateTime(timestamp) {
     minute: "2-digit",
     second: "2-digit",
     hour12: true,
-    timeZone: "Asia/Bahrain",
   });
 }
 
@@ -368,7 +368,10 @@ async function checkJarifLoginForNotification(loginData) {
   }
 
   const deviceInfo = loginData.deviceInfo || {};
-  const bahrainTime = formatBahrainDateTime(loginData.timestamp || Date.now());
+  // Use Bahrain timestamp if available
+  const timestamp =
+    loginData.timestampBahrain || loginData.timestamp || Date.now();
+  const bahrainTime = formatBahrainDateTime(timestamp);
 
   let deviceDetails = `**Device Model:** ${
     deviceInfo.deviceModel || "Unknown"
@@ -412,10 +415,11 @@ async function checkLoginPageAccess(loginData) {
       return;
     }
 
-    const timestamp = loginData.timestamp || Date.now();
+    // Use Bahrain timestamp if available
+    const timestamp =
+      loginData.timestampBahrain || loginData.timestamp || Date.now();
     const bahrainTime = formatBahrainDateTime(timestamp);
 
-    // In checkLoginPageAccess():
     const deviceId = loginData.deviceId || "Unknown device";
     const deviceModel = loginData.deviceModel || "Unknown";
     const deviceType = loginData.deviceType || "Unknown";
@@ -429,7 +433,10 @@ async function checkLoginPageAccess(loginData) {
 
     await sendDiscordNotification(
       `<@765280345260032030>`,
-      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainTime} AST`,
+      `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent.substring(
+        0,
+        100
+      )}\n**Time:** ${bahrainTime}`,
       DISCORD_WEBHOOK_URL,
       false,
       false,

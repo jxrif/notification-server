@@ -376,12 +376,13 @@ async function checkJarifLoginForNotification(loginData) {
   deviceDetails += `**Device Type:** ${deviceInfo.deviceType || "Unknown"}\n`;
   deviceDetails += `**Platform:** ${deviceInfo.platform || "Unknown"}\n`;
   deviceDetails += `**Screen:** ${deviceInfo.screenSize || "Unknown"}\n`;
+  deviceDetails += `**Window:** ${deviceInfo.windowSize || "Unknown"}\n`;
   deviceDetails += `**Device ID:** ${
     deviceInfo.deviceId ? deviceInfo.deviceId : "Unknown"
   }\n`;
   deviceDetails += `**Timezone:** ${deviceInfo.timezone || "Unknown"}\n`;
   deviceDetails += `**Browser:** ${
-    deviceInfo.userAgent ? deviceInfo.userAgent : "Unknown"
+    deviceInfo.userAgent ? deviceInfo.userAgent.substring(0, 100) : "Unknown"
   }`;
 
   await sendDiscordNotification(
@@ -414,15 +415,17 @@ async function checkLoginPageAccess(loginData) {
     const timestamp = loginData.timestamp || Date.now();
     const bahrainTime = formatBahrainDateTime(timestamp);
 
+    // In checkLoginPageAccess():
     const deviceId = loginData.deviceId || "Unknown device";
     const deviceModel = loginData.deviceModel || "Unknown";
     const deviceType = loginData.deviceType || "Unknown";
     const userAgent = loginData.userAgent || "Unknown";
     const screenSize = loginData.screenSize || "Unknown";
+    const windowSize = loginData.windowSize || "Unknown";
     const platform = loginData.platform || "Unknown";
     const timezone = loginData.timezone || "Unknown";
 
-    const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenSize}`;
+    const deviceInfo = `**Device ID:** ${deviceId}\n**Model:** ${deviceModel} (${deviceType})\n**Platform:** ${platform}\n**Screen:** ${screenSize}\n**Window:** ${windowSize}`;
 
     await sendDiscordNotification(
       `<@765280345260032030>`,

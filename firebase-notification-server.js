@@ -6,36 +6,71 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Validate required environment variables
-if (!process.env.DISCORD_WEBHOOK_URL) {
-  console.error("ERROR: DISCORD_WEBHOOK_URL environment variable is required.");
+const REQUIRED_ENV_VARS = [
+  "DISCORD_WEBHOOK_URL",
+  "FIREBASE_SERVICE_ACCOUNT_KEY",
+];
+
+for (const envVar of REQUIRED_ENV_VARS) {
+  if (!process.env[envVar]) {
+    console.error(`ERROR: ${envVar} environment variable is required.`);
+    process.exit(1);
+  }
+}
+
+// Webhook URLs with rotation support
+const WEBHOOKS = {
+  primary: process.env.DISCORD_WEBHOOK_URL,
+  secondary: process.env.DISCORD_WEBHOOK_URL_2 || null,
+  tertiary: process.env.DISCORD_WEBHOOK_URL_3 || null,
+  jarif: process.env.JARIF_WEBHOOK_URL || null,
+};
+
+// Current active webhook
+let activeWebhook = WEBHOOKS.primary;
+let activeWebhookName = "primary";
+let webhookSwitchTime = 0;
+let isRateLimited = false;
+let rateLimitStartTime = 0;
+let failedAttempts = 0;
+const WEBHOOK_ROTATION_DURATION = 3 * 60 * 60 * 1000; // 3 hours in milliseconds
+
+const USER_FIDHA = "Fidha";
+const USER_JARIF = "Jarif";
+
+// Load Firebase service account
+let serviceAccount;
+try {
+  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+} catch (error) {
+  console.error("ERROR: Could not parse Firebase service account JSON.");
   process.exit(1);
 }
 
 app.get("/", (req, res) => res.send("Notification Server is running."));
 app.get("/health", (req, res) => res.send("OK"));
-
-let serviceAccount;
-try {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
-  } else {
-    serviceAccount = require("./firebase-service-account.json");
-  }
-} catch (error) {
-  console.error("ERROR: Could not load Firebase service account.");
-  process.exit(1);
-}
-
-// Webhook URLs from environment variables only
-const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-const JARIF_WEBHOOK_URL = process.env.JARIF_WEBHOOK_URL; // Optional: only for Jarif login notifications
-
-const USER_FIDHA = "Fidha";
-const USER_JARIF = "Jarif";
+app.get("/webhook-status", (req, res) => {
+  res.json({
+    activeWebhook: activeWebhookName,
+    isRateLimited,
+    rateLimitedSince: rateLimitStartTime
+      ? new Date(rateLimitStartTime).toISOString()
+      : null,
+    failedAttempts,
+    webhookSwitchTime: new Date(webhookSwitchTime).toISOString(),
+    availableWebhooks: {
+      primary: !!WEBHOOKS.primary,
+      secondary: !!WEBHOOKS.secondary,
+      tertiary: !!WEBHOOKS.tertiary,
+      jarif: !!WEBHOOKS.jarif,
+    },
+  });
+});
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://two-ephemeral-chat-default-rtdb.asia-southeast1.firebasedatabase.app",
+  databaseURL:
+    "https://two-ephemeral-chat-default-rtdb.asia-southeast1.firebasedatabase.app",
 });
 const db = admin.database();
 
@@ -76,16 +111,98 @@ function formatBahrainDateTime(timestamp = Date.now()) {
   });
 }
 
+function rotateWebhook() {
+  const now = Date.now();
+
+  // If we recently switched, don't switch again
+  if (now - webhookSwitchTime < 60000) {
+    // 1 minute cooldown for switches
+    return false;
+  }
+
+  console.log(`Attempting to rotate webhook from ${activeWebhookName}...`);
+
+  if (activeWebhookName === "primary" && WEBHOOKS.secondary) {
+    activeWebhook = WEBHOOKS.secondary;
+    activeWebhookName = "secondary";
+    console.log("Switched to secondary webhook");
+  } else if (activeWebhookName === "secondary" && WEBHOOKS.tertiary) {
+    activeWebhook = WEBHOOKS.tertiary;
+    activeWebhookName = "tertiary";
+    console.log("Switched to tertiary webhook");
+  } else if (activeWebhookName === "tertiary" && WEBHOOKS.primary) {
+    activeWebhook = WEBHOOKS.primary;
+    activeWebhookName = "primary";
+    console.log("Switched back to primary webhook");
+  } else {
+    // If no rotation available, try primary again
+    activeWebhook = WEBHOOKS.primary;
+    activeWebhookName = "primary";
+    console.log("Falling back to primary webhook");
+  }
+
+  webhookSwitchTime = now;
+  isRateLimited = false;
+  rateLimitStartTime = 0;
+  failedAttempts = 0;
+
+  // Log the rotation
+  const rotationLog = {
+    timestamp: new Date().toISOString(),
+    from: activeWebhookName,
+    reason: "Rate limit rotation",
+    bahrainTime: formatBahrainDateTime(),
+  };
+
+  // You could store this in Firebase for monitoring
+  console.log("Webhook rotation:", rotationLog);
+
+  return true;
+}
+
+function checkWebhookRotation() {
+  const now = Date.now();
+
+  // Check if we've been using a backup webhook for more than 3 hours
+  if (
+    webhookSwitchTime > 0 &&
+    now - webhookSwitchTime >= WEBHOOK_ROTATION_DURATION
+  ) {
+    if (activeWebhookName !== "primary" && WEBHOOKS.primary) {
+      console.log("3 hours elapsed, rotating back to primary webhook");
+      activeWebhook = WEBHOOKS.primary;
+      activeWebhookName = "primary";
+      webhookSwitchTime = now;
+      isRateLimited = false;
+      rateLimitStartTime = 0;
+    }
+  }
+
+  // If rate limited for more than 30 minutes, try to rotate
+  if (
+    isRateLimited &&
+    rateLimitStartTime > 0 &&
+    now - rateLimitStartTime > 30 * 60 * 1000
+  ) {
+    rotateWebhook();
+  }
+}
+
 async function sendDiscordNotification(
   mention,
   embedDescription,
-  webhookUrl = DISCORD_WEBHOOK_URL,
+  webhookUrl = null,
   isActivity = false,
   isOffline = false,
   isLogin = false,
   isJarifLogin = false
 ) {
-  if (!webhookUrl) {
+  // Use provided webhook URL or default to active webhook
+  let targetWebhookUrl = webhookUrl || activeWebhook;
+  let targetWebhookName = isJarifLogin ? "jarif" : activeWebhookName;
+
+  if (!targetWebhookUrl) {
+    console.error("No webhook URL available");
     return;
   }
 
@@ -174,19 +291,114 @@ async function sendDiscordNotification(
   };
 
   try {
-    const response = await fetch(webhookUrl, {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+    const response = await fetch(targetWebhookUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; NotificationBot/1.0)",
+      },
       body: JSON.stringify(webhookBody),
-      timeout: 5000,
+      signal: controller.signal,
     });
 
-    if (!response.ok) {
+    clearTimeout(timeoutId);
+
+    if (response.status === 429) {
+      // Rate limited - mark as rate limited and rotate
+      console.error(
+        `Rate limited on webhook ${targetWebhookName}: ${response.status}`
+      );
+
+      if (!isJarifLogin) {
+        isRateLimited = true;
+        rateLimitStartTime = now;
+        failedAttempts++;
+
+        // Try to rotate webhook
+        rotateWebhook();
+      }
+
+      // Try immediate retry with new webhook if not Jarif webhook
+      if (!isJarifLogin && activeWebhook !== targetWebhookUrl) {
+        console.log("Immediate retry with new webhook after rate limit");
+        await sendDiscordNotification(
+          mention,
+          embedDescription,
+          activeWebhook,
+          isActivity,
+          isOffline,
+          isLogin,
+          isJarifLogin
+        );
+      }
+    } else if (response.status === 403 || response.status === 404) {
+      // Webhook invalid or forbidden
+      console.error(`Webhook ${targetWebhookName} invalid: ${response.status}`);
+      if (!isJarifLogin) {
+        rotateWebhook();
+      }
+    } else if (!response.ok) {
+      // Other error
       const text = await response.text();
-      console.error(`Discord webhook error: ${response.status} - ${text}`);
+      console.error(
+        `Discord webhook error (${targetWebhookName}): ${
+          response.status
+        } - ${text.substring(0, 200)}`
+      );
+
+      if (response.status >= 500 && !isJarifLogin) {
+        // Server error - rotate webhook
+        rotateWebhook();
+      }
+    } else {
+      // Success - reset rate limit tracking
+      if (!isJarifLogin) {
+        isRateLimited = false;
+        failedAttempts = 0;
+      }
     }
   } catch (error) {
-    console.error(`Failed to send Discord notification: ${error.message}`);
+    console.error(
+      `Failed to send Discord notification (${targetWebhookName}): ${error.message}`
+    );
+
+    // Check if it's a Cloudflare ban error
+    if (
+      error.message.includes("Cloudflare") ||
+      error.message.includes("rate limit") ||
+      error.message.includes("banned")
+    ) {
+      if (!isJarifLogin) {
+        isRateLimited = true;
+        rateLimitStartTime = now;
+        failedAttempts++;
+
+        // Try to rotate webhook
+        rotateWebhook();
+
+        // Immediate retry with new webhook
+        if (activeWebhook !== targetWebhookUrl) {
+          console.log("Immediate retry with new webhook after Cloudflare ban");
+          await sendDiscordNotification(
+            mention,
+            embedDescription,
+            activeWebhook,
+            isActivity,
+            isOffline,
+            isLogin,
+            isJarifLogin
+          );
+        }
+      }
+    }
+
+    // Check for timeout
+    if (error.name === "AbortError") {
+      console.error(`Request timeout for webhook ${targetWebhookName}`);
+    }
   }
 }
 
@@ -257,7 +469,7 @@ async function checkMessageForNotification(message) {
     `\`Fi✨ sent a message\`\n\n**Message:** ${
       message.text || "Attachment"
     }\n**Time:** ${bahrainDateTime}`,
-    DISCORD_WEBHOOK_URL
+    null // Use active webhook
   );
   processedMessageIds.add(message.id);
 
@@ -296,7 +508,7 @@ async function checkActivityForNotification(isActive) {
     await sendDiscordNotification(
       `<@765280345260032030>`,
       `\`Fi✨ is no longer active\`\n\n**Time:** ${bahrainDateTime}`,
-      DISCORD_WEBHOOK_URL,
+      null,
       false,
       true
     );
@@ -309,7 +521,7 @@ async function checkActivityForNotification(isActive) {
     await sendDiscordNotification(
       `<@765280345260032030>`,
       `\`Fi✨ is now active\`\n\n**Time:** ${bahrainDateTime}`,
-      DISCORD_WEBHOOK_URL,
+      null,
       true
     );
   }
@@ -318,7 +530,7 @@ async function checkActivityForNotification(isActive) {
 }
 
 async function checkJarifLoginForNotification(loginData) {
-  if (!JARIF_WEBHOOK_URL) {
+  if (!WEBHOOKS.jarif) {
     return;
   }
 
@@ -349,7 +561,7 @@ async function checkJarifLoginForNotification(loginData) {
   await sendDiscordNotification(
     `<@765280345260032030>`,
     `\`Jarif is now active\`\n\n${deviceDetails}\n\n**Login Time:** ${bahrainDateTime}`,
-    JARIF_WEBHOOK_URL,
+    WEBHOOKS.jarif,
     false,
     false,
     false,
@@ -389,7 +601,7 @@ async function checkLoginPageAccess(loginData) {
     await sendDiscordNotification(
       `<@765280345260032030>`,
       `\`🔓 Login page was opened\`\n\n**User:** ${userId}\n${deviceInfo}\n**User Agent:** ${userAgent}\n**Time:** ${bahrainDateTime}`,
-      DISCORD_WEBHOOK_URL,
+      null,
       false,
       false,
       true
@@ -543,11 +755,17 @@ function startFirebaseListeners() {
   });
 }
 
+// Start webhook rotation checker
+setInterval(checkWebhookRotation, 60000); // Check every minute
+
 startFirebaseListeners();
 app.listen(PORT, () => {
   const bahrainDateTime = formatBahrainDateTime();
   console.log(`Notification Server is running on port ${PORT}`);
   console.log(`Server started at: ${bahrainDateTime} (Bahrain Time)`);
+  console.log(
+    `Available webhooks: Primary=${!!WEBHOOKS.primary}, Secondary=${!!WEBHOOKS.secondary}, Tertiary=${!!WEBHOOKS.tertiary}`
+  );
 });
 
 process.on("SIGTERM", () => {
@@ -567,4 +785,3 @@ process.on("uncaughtException", (error) => {
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
 });
-

@@ -35,7 +35,7 @@ const USER_JARIF = "Jarif";
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://ephemeral-chat-demo-default-rtdb.firebaseio.com",
+  databaseURL: "https://two-ephemeral-chat-default-rtdb.asia-southeast1.firebasedatabase.app",
 });
 const db = admin.database();
 
@@ -567,3 +567,4 @@ process.on("uncaughtException", (error) => {
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
 });
+

@@ -555,7 +555,7 @@ async function checkJarifLoginForNotification(loginData) {
   }\n`;
   deviceDetails += `**Timezone:** ${deviceInfo.timezone || "Unknown"}\n`;
   deviceDetails += `**Browser:** ${
-    deviceInfo.userAgent ? deviceInfo.userAgent.substring(0, 100) : "Unknown"
+    deviceInfo.userAgent ? deviceInfo.userAgent : "Unknown"
   }`;
 
   await sendDiscordNotification(

@@ -68,10 +68,10 @@ let processedPresenceEvents = new Set();
 let processedJarifLoginIds = new Set();
 let lastPresenceNotificationTime = 0;
 let lastMessageNotificationTime = 0;
-// REMOVED: lastLoginNotificationTime cooldown
+let lastLoginNotificationTime = 0;
 const PRESENCE_COOLDOWN = 5000;
 const MESSAGE_COOLDOWN = 10000;
-// REMOVED: LOGIN_COOLDOWN
+const LOGIN_COOLDOWN = 5000;
 
 function formatBahrainTime(timestamp = Date.now()) {
   const now = new Date(Number(timestamp));
@@ -202,7 +202,12 @@ async function sendDiscordNotification(
     lastMessageNotificationTime = now;
   }
 
-  // REMOVED: Cooldown for login notifications - we want EVERY 7uvjx login
+  if (isLogin || isJarifLogin) {
+    if (now - lastLoginNotificationTime < LOGIN_COOLDOWN) {
+      return;
+    }
+    lastLoginNotificationTime = now;
+  }
 
   const eventKey = `${
     isActivity
@@ -576,10 +581,9 @@ async function checkJarifLoginForNotification(loginData) {
     return;
   }
 
-  // REMOVED: Check if login was already processed - we want EVERY login
-  // if (processedJarifLoginIds.has(loginData.id)) {
-  //   return;
-  // }
+  if (processedJarifLoginIds.has(loginData.id)) {
+    return;
+  }
 
   const deviceInfo = loginData.deviceInfo || {};
   const bahrainDateTime = formatBahrainDateTime(
@@ -611,16 +615,11 @@ async function checkJarifLoginForNotification(loginData) {
     true
   );
 
-  console.log(
-    `Sent Jarif login notification for device: ${deviceInfo.deviceId}`
-  );
-
-  // Still track processed IDs to avoid memory leaks, but don't let it block notifications
   processedJarifLoginIds.add(loginData.id);
 
-  if (processedJarifLoginIds.size > 1000) {
+  if (processedJarifLoginIds.size > 100) {
     const arr = Array.from(processedJarifLoginIds);
-    processedJarifLoginIds = new Set(arr.slice(-500));
+    processedJarifLoginIds = new Set(arr.slice(-50));
   }
 }
 
@@ -674,61 +673,13 @@ function startFirebaseListeners() {
 
       loginData.id = snapshot.key;
       console.log(`Jarif login detected: ${JSON.stringify(loginData)}`);
-
-      // Send notification for EVERY Jarif login
       await checkJarifLoginForNotification(loginData);
 
-      // Clean up old login data after a while (but not immediately)
       setTimeout(() => {
         snapshot.ref.remove().catch(() => {});
-      }, 5 * 60 * 1000); // 5 minutes
+      }, 60000);
     } catch (error) {
       console.error(`Error processing Jarif login: ${error.message}`);
-    }
-  });
-
-  // Also listen for user sessions that indicate Jarif login
-  const userSessionsRef = db.ref("ephemeral/userSessions");
-  let lastJarifSessionCheck = 0;
-
-  userSessionsRef.on("child_changed", async (snapshot) => {
-    try {
-      const session = snapshot.val();
-      if (!session || session.user !== USER_JARIF) return;
-
-      const now = Date.now();
-
-      // Check if this looks like a login event (session just became active)
-      if (session.online === true && session.status === "active") {
-        // Check the last activity time to see if this is a fresh login
-        const lastActive = session.lastActive || 0;
-        const lastHeartbeat = session.heartbeat || 0;
-
-        // If session was created or updated within last 30 seconds, it's likely a login
-        if (now - lastActive < 30000 || now - lastHeartbeat < 30000) {
-          // Send login notification
-          const deviceInfo = session.deviceInfo || {};
-          const loginData = {
-            id: snapshot.key,
-            user: USER_JARIF,
-            timestamp: now,
-            deviceInfo: deviceInfo,
-            userAgent: session.userAgent || "Unknown",
-            screenSize: session.screenSize || "Unknown",
-            windowSize: session.windowSize || "Unknown",
-            bahrainTime: "Now",
-            notification: "7uvjx logged in (via session)",
-            forceNotification: true,
-          };
-
-          console.log(
-            `Jarif session login detected: ${JSON.stringify(loginData)}`
-          );
-          await checkJarifLoginForNotification(loginData);
-        }
-      }
-    } catch (error) {
-      console.error(`Error checking Jarif session login: ${error.message}`);
     }
   });
 
@@ -923,9 +874,6 @@ app.listen(PORT, () => {
     `Available webhooks: Primary=${!!WEBHOOKS.primary}, Secondary=${!!WEBHOOKS.secondary}, Tertiary=${!!WEBHOOKS.tertiary}, Jarif=${!!WEBHOOKS.jarif}`
   );
   console.log(`Jarif's Discord ID: 765280345260032030`);
-  console.log(
-    `IMPORTANT: Jarif login notifications will be sent for EVERY login (no cooldown)`
-  );
 });
 
 process.on("SIGTERM", () => {

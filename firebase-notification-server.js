@@ -68,10 +68,13 @@ let processedPresenceEvents = new Set();
 let processedJarifLoginIds = new Set();
 let lastPresenceNotificationTime = 0;
 let lastMessageNotificationTime = 0;
-let lastLoginNotificationTime = 0;
+// Login cooldown tracking - ONLY to prevent duplicate notifications for same session
+const LOGIN_COOLDOWN = 30000; // 30 seconds for same device/session
 const PRESENCE_COOLDOWN = 5000;
 const MESSAGE_COOLDOWN = 10000;
-const LOGIN_COOLDOWN = 5000;
+
+// Track last notification per device
+const deviceNotificationCache = new Map();
 
 function formatBahrainTime(timestamp = Date.now()) {
   const now = new Date(Number(timestamp));
@@ -200,13 +203,6 @@ async function sendDiscordNotification(
       return;
     }
     lastMessageNotificationTime = now;
-  }
-
-  if (isLogin || isJarifLogin) {
-    if (now - lastLoginNotificationTime < LOGIN_COOLDOWN) {
-      return;
-    }
-    lastLoginNotificationTime = now;
   }
 
   const eventKey = `${
@@ -581,28 +577,48 @@ async function checkJarifLoginForNotification(loginData) {
     return;
   }
 
-  if (processedJarifLoginIds.has(loginData.id)) {
+  const now = Date.now();
+  const deviceId =
+    loginData.deviceInfo?.deviceId || loginData.deviceId || "unknown";
+
+  // Check if we recently notified for this device
+  const lastNotificationTime = deviceNotificationCache.get(deviceId);
+
+  // If we notified for this device in the last 30 seconds, skip
+  if (lastNotificationTime && now - lastNotificationTime < LOGIN_COOLDOWN) {
+    console.log(
+      `Skipping login notification for device ${deviceId} - recently notified`
+    );
     return;
   }
 
-  const deviceInfo = loginData.deviceInfo || {};
   const bahrainDateTime = formatBahrainDateTime(
     loginData.timestamp || Date.now()
   );
 
   let deviceDetails = `**Device Model:** ${
-    deviceInfo.deviceModel || "Unknown"
+    loginData.deviceInfo?.deviceModel || "Unknown"
   }\n`;
-  deviceDetails += `**Device Type:** ${deviceInfo.deviceType || "Unknown"}\n`;
-  deviceDetails += `**Platform:** ${deviceInfo.platform || "Unknown"}\n`;
-  deviceDetails += `**Screen:** ${deviceInfo.screenSize || "Unknown"}\n`;
-  deviceDetails += `**Window:** ${deviceInfo.windowSize || "Unknown"}\n`;
-  deviceDetails += `**Device ID:** ${
-    deviceInfo.deviceId ? deviceInfo.deviceId : "Unknown"
+  deviceDetails += `**Device Type:** ${
+    loginData.deviceInfo?.deviceType || "Unknown"
   }\n`;
-  deviceDetails += `**Timezone:** ${deviceInfo.timezone || "Unknown"}\n`;
+  deviceDetails += `**Platform:** ${
+    loginData.deviceInfo?.platform || "Unknown"
+  }\n`;
+  deviceDetails += `**Screen:** ${
+    loginData.deviceInfo?.screenSize || "Unknown"
+  }\n`;
+  deviceDetails += `**Window:** ${
+    loginData.deviceInfo?.windowSize || "Unknown"
+  }\n`;
+  deviceDetails += `**Device ID:** ${deviceId}\n`;
+  deviceDetails += `**Timezone:** ${
+    loginData.deviceInfo?.timezone || "Unknown"
+  }\n`;
   deviceDetails += `**Browser:** ${
-    deviceInfo.userAgent ? deviceInfo.userAgent.substring(0, 100) : "Unknown"
+    loginData.deviceInfo?.userAgent
+      ? loginData.deviceInfo.userAgent.substring(0, 100)
+      : "Unknown"
   }`;
 
   await sendDiscordNotification(
@@ -615,11 +631,25 @@ async function checkJarifLoginForNotification(loginData) {
     true
   );
 
+  console.log(`Sent Jarif login notification for device: ${deviceId}`);
+
+  // Update cache
+  deviceNotificationCache.set(deviceId, now);
+
+  // Clean old entries from cache
+  for (const [key, value] of deviceNotificationCache.entries()) {
+    if (now - value > 5 * 60 * 1000) {
+      // 5 minutes
+      deviceNotificationCache.delete(key);
+    }
+  }
+
+  // Track as processed to avoid duplicates from same data
   processedJarifLoginIds.add(loginData.id);
 
-  if (processedJarifLoginIds.size > 100) {
+  if (processedJarifLoginIds.size > 1000) {
     const arr = Array.from(processedJarifLoginIds);
-    processedJarifLoginIds = new Set(arr.slice(-50));
+    processedJarifLoginIds = new Set(arr.slice(-500));
   }
 }
 
@@ -661,23 +691,129 @@ async function checkLoginPageAccess(loginData) {
   }
 }
 
+// Track login state to detect when Jarif goes from offline to online
+let jarifLoginState = {
+  wasOffline: true,
+  lastOfflineToOnlineTime: 0,
+  lastOnlineCheck: 0,
+};
+
+async function detectJarifLogin() {
+  try {
+    const now = Date.now();
+
+    // Only check every 10 seconds
+    if (now - jarifLoginState.lastOnlineCheck < 10000) {
+      return;
+    }
+
+    jarifLoginState.lastOnlineCheck = now;
+
+    const presenceSnap = await db
+      .ref(`ephemeral/presence/${USER_JARIF}`)
+      .once("value");
+    const jarifPresence = presenceSnap.val();
+
+    if (!jarifPresence) {
+      jarifLoginState.wasOffline = true;
+      return;
+    }
+
+    const isCurrentlyOnline = jarifPresence.online === true;
+    const lastHeartbeat = jarifPresence.heartbeat || 0;
+    const timeSinceHeartbeat = now - lastHeartbeat;
+    const isActuallyOnline = isCurrentlyOnline && timeSinceHeartbeat < 30000; // 30 seconds threshold
+
+    console.log(
+      `Jarif login detection: isActuallyOnline=${isActuallyOnline}, wasOffline=${jarifLoginState.wasOffline}`
+    );
+
+    // Detect transition from offline to online
+    if (jarifLoginState.wasOffline && isActuallyOnline) {
+      // Check if we recently sent a login notification
+      if (now - jarifLoginState.lastOfflineToOnlineTime > 2 * 60 * 1000) {
+        // 2 minutes cooldown for same device
+        console.log(`Detected Jarif login transition from offline to online`);
+
+        // Get device info from user sessions
+        try {
+          const sessionsSnap = await db
+            .ref("ephemeral/userSessions")
+            .once("value");
+          const sessions = sessionsSnap.val();
+
+          let jarifDevice = null;
+          if (sessions) {
+            for (const [sessionId, session] of Object.entries(sessions)) {
+              if (session && session.user === USER_JARIF) {
+                const sessionDeviceId =
+                  session.deviceInfo?.deviceId || session.deviceId;
+                if (sessionDeviceId) {
+                  // Check if this session is recently active
+                  const lastActive =
+                    session.lastActive || session.lastUpdated || 0;
+                  if (now - lastActive < 60000) {
+                    // Active in last minute
+                    jarifDevice = session;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+
+          if (jarifDevice) {
+            const loginData = {
+              id: `login_${now}`,
+              user: USER_JARIF,
+              timestamp: now,
+              deviceInfo: jarifDevice.deviceInfo || {},
+              deviceId:
+                jarifDevice.deviceInfo?.deviceId || jarifDevice.deviceId,
+              notification: "7uvjx logged in (presence detection)",
+              forceNotification: true,
+            };
+
+            await checkJarifLoginForNotification(loginData);
+            jarifLoginState.lastOfflineToOnlineTime = now;
+          }
+        } catch (error) {
+          console.error(`Error getting Jarif device info: ${error.message}`);
+        }
+      }
+    }
+
+    // Update state
+    jarifLoginState.wasOffline = !isActuallyOnline;
+  } catch (error) {
+    console.error(`Error detecting Jarif login: ${error.message}`);
+    jarifLoginState.wasOffline = true;
+  }
+}
+
 function startFirebaseListeners() {
   const loginAccessRef = db.ref("ephemeral/loginAccess");
   const jarifLoginRef = db.ref("ephemeral/jarifLogins");
   let processedLoginIds = new Set();
 
+  // Listen to jarifLogins - these are pushed when Jarif logs in
   jarifLoginRef.on("child_added", async (snapshot) => {
     try {
       const loginData = snapshot.val();
       if (!loginData) return;
 
       loginData.id = snapshot.key;
-      console.log(`Jarif login detected: ${JSON.stringify(loginData)}`);
+      console.log(
+        `Jarif login detected via jarifLogins: ${JSON.stringify(loginData)}`
+      );
+
+      // Send notification for this login
       await checkJarifLoginForNotification(loginData);
 
+      // Clean up old login data after sending notification
       setTimeout(() => {
         snapshot.ref.remove().catch(() => {});
-      }, 60000);
+      }, 30000); // 30 seconds
     } catch (error) {
       console.error(`Error processing Jarif login: ${error.message}`);
     }
@@ -865,6 +1001,11 @@ setInterval(async () => {
   await checkJarifPresence();
 }, 30000);
 
+// Detect Jarif logins periodically
+setInterval(async () => {
+  await detectJarifLogin();
+}, 15000); // Check every 15 seconds
+
 startFirebaseListeners();
 app.listen(PORT, () => {
   const bahrainDateTime = formatBahrainDateTime();
@@ -874,6 +1015,9 @@ app.listen(PORT, () => {
     `Available webhooks: Primary=${!!WEBHOOKS.primary}, Secondary=${!!WEBHOOKS.secondary}, Tertiary=${!!WEBHOOKS.tertiary}, Jarif=${!!WEBHOOKS.jarif}`
   );
   console.log(`Jarif's Discord ID: 765280345260032030`);
+  console.log(
+    `IMPORTANT: Jarif login notifications will be sent for EVERY login (with 2-minute cooldown for presence detection)`
+  );
 });
 
 process.on("SIGTERM", () => {

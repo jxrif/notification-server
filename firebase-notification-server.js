@@ -62,7 +62,7 @@ app.get("/webhook-status", (req, res) => {
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   databaseURL:
-    "https://two-ephemeral-chat-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "https://ephemeral-chat-demo-default-rtdb.firebaseio.com",
 });
 const db = admin.database();
 
@@ -1121,3 +1121,4 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error(`   Reason: ${reason}`);
   console.error(`=========================================`);
 });
+

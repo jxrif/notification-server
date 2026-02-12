@@ -6,7 +6,7 @@ const fetch = require("node-fetch");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---------- TELEGRAM CONFIGURATION ----------
+// ---------- TELEGRAM ----------
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
@@ -21,54 +21,57 @@ const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/send
 const USER_FIDHA = "Fidha";
 const USER_JARIF = "Jarif";
 
-// ---------- COOLDOWN SETTINGS ----------
-const MESSAGE_COOLDOWN = 3000; // 3 seconds
-const PRESENCE_COOLDOWN = 5000; // 5 seconds
-const LOGIN_COOLDOWN = 0; // immediate (no cooldown)
+// ---------- COOLDOWNS ----------
+const MESSAGE_COOLDOWN = 3000;        // 3 seconds
+const PRESENCE_COOLDOWN = 5000;       // 5 seconds
+const LOGIN_COOLDOWN = 0;            // immediate
 const DEVICE_NOTIFICATION_COOLDOWN = 30000; // 30 seconds
 
-// ---------- STATE VARIABLES ----------
+// ---------- STATE ----------
 let jarifIsActuallyOffline = true;
 let previousFiOnlineState = false;
-let processedMessageIds = new Set();
-let processedPresenceEvents = new Set();
-let processedJarifLoginIds = new Set();
+
+const processedMessageIds = new Set();
+const processedPresenceEvents = new Set();
+const processedJarifLoginIds = new Set();
+const lastDeviceNotificationTimes = new Map();
+
 let lastMessageNotificationTime = 0;
 let lastPresenceNotificationTime = 0;
 let lastLoginNotificationTime = 0;
 
-const lastDeviceNotificationTimes = new Map();
+// ---------- FIREBASE – IMPORTANT: USE YOUR REAL DATABASE URL ----------
+// Match your frontend config: "ephemeral-chat-three-default-rtdb.firebaseio.com"
+const FIREBASE_DATABASE_URL =
+  "https://ephemeral-chat-three-default-rtdb.firebaseio.com";
 
-// ---------- FIREBASE ----------
 let serviceAccount;
 try {
   serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
 } catch (error) {
-  console.error("❌ Could not parse Firebase service account JSON.");
+  console.error("❌ Cannot parse Firebase service account JSON.");
   console.error(error.message);
   process.exit(1);
 }
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL:
-    "https://two-ephemeral-chat-default-rtdb.asia-southeast1.firebasedatabase.app",
+  databaseURL: FIREBASE_DATABASE_URL,
 });
 const db = admin.database();
 
-// ---------- TIME FORMATTERS (Bahrain time) ----------
-function formatBahrainTime(timestamp = Date.now()) {
-  return new Date(Number(timestamp)).toLocaleTimeString("en-US", {
+// ---------- TIME FORMATTERS (Bahrain) ----------
+const formatBahrainTime = (ts = Date.now()) =>
+  new Date(ts).toLocaleTimeString("en-US", {
     timeZone: "Asia/Bahrain",
     hour12: true,
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   });
-}
 
-function formatBahrainDateTime(timestamp = Date.now()) {
-  return new Date(Number(timestamp)).toLocaleString("en-US", {
+const formatBahrainDateTime = (ts = Date.now()) =>
+  new Date(ts).toLocaleString("en-US", {
     timeZone: "Asia/Bahrain",
     year: "numeric",
     month: "short",
@@ -78,394 +81,322 @@ function formatBahrainDateTime(timestamp = Date.now()) {
     second: "2-digit",
     hour12: true,
   });
-}
 
-// ---------- TELEGRAM SEND FUNCTION ----------
-async function sendTelegramMessage(messageText, parseMode = "HTML") {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.error("❌ Telegram credentials missing.");
-    return;
-  }
+// ---------- TELEGRAM SEND WITH AUTO‑RETRY ON 429 ----------
+async function sendTelegramMessage(text, parseMode = "HTML") {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
   const payload = {
     chat_id: TELEGRAM_CHAT_ID,
-    text: messageText,
+    text,
     parse_mode: parseMode,
     disable_web_page_preview: true,
   };
 
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+  let attempts = 0;
+  const maxAttempts = 5;
 
-    const response = await fetch(TELEGRAM_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
+  while (attempts < maxAttempts) {
+    attempts++;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-    clearTimeout(timeoutId);
+      const response = await fetch(TELEGRAM_API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`❌ Telegram API error (${response.status}): ${errorText}`);
-      // 429 = Too Many Requests – Telegram rate limit (30 msg/sec per chat)
+      clearTimeout(timeoutId);
+
       if (response.status === 429) {
-        console.warn(
-          "⏸️ Telegram rate limit hit. Will retry later (cooldown applied).",
-        );
+        const retryAfter = response.headers.get("retry-after");
+        const waitSec = retryAfter ? parseInt(retryAfter, 10) : 5;
+        console.warn(`⏸️ Telegram rate limit. Retrying after ${waitSec}s...`);
+        await new Promise((resolve) => setTimeout(resolve, waitSec * 1000));
+        continue;
       }
-    } else {
-      console.log("✅ Telegram message sent successfully.");
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`❌ Telegram API error (${response.status}): ${errorText}`);
+        // Don't retry on 4xx except 429
+        break;
+      }
+
+      console.log("✅ Telegram message sent.");
+      return; // success
+    } catch (error) {
+      if (error.name === "AbortError") {
+        console.error("⏱️ Request timeout.");
+      } else {
+        console.error(`🔥 Network error: ${error.message}`);
+      }
+      // Wait a bit before retrying on network errors
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
-  } catch (error) {
-    console.error(`🔥 Telegram send error: ${error.message}`);
   }
+
+  console.error("❌ Failed to send Telegram message after multiple attempts.");
 }
 
 // ---------- CENTRAL NOTIFICATION DISPATCHER ----------
-async function sendNotification(
-  title,
-  description,
-  type = "info",
-  isJarifLogin = false,
-) {
+async function sendNotification(title, description, type = "info", isJarifLogin = false) {
   const now = Date.now();
 
-  // ---- Cooldown handling ----
+  // ---- Cooldowns ----
   if (type === "message") {
-    if (now - lastMessageNotificationTime < MESSAGE_COOLDOWN) {
-      console.log(`⏸️ Message cooldown active (${MESSAGE_COOLDOWN}ms)`);
-      return;
-    }
+    if (now - lastMessageNotificationTime < MESSAGE_COOLDOWN) return;
     lastMessageNotificationTime = now;
   } else if (type === "presence") {
-    if (now - lastPresenceNotificationTime < PRESENCE_COOLDOWN) {
-      console.log(`⏸️ Presence cooldown active (${PRESENCE_COOLDOWN}ms)`);
-      return;
-    }
+    if (now - lastPresenceNotificationTime < PRESENCE_COOLDOWN) return;
     lastPresenceNotificationTime = now;
   } else if (type === "login" && !isJarifLogin) {
-    if (now - lastLoginNotificationTime < LOGIN_COOLDOWN) {
-      console.log(`⏸️ Login cooldown active (${LOGIN_COOLDOWN}ms)`);
-      return;
-    }
+    if (now - lastLoginNotificationTime < LOGIN_COOLDOWN) return;
     lastLoginNotificationTime = now;
   }
 
-  // ---- Emoji mapping ----
-  let emoji = "ℹ️";
-  if (type === "message") emoji = "💬";
-  else if (type === "presence") emoji = "🟢";
-  else if (type === "offline") emoji = "🔴";
-  else if (type === "login") emoji = isJarifLogin ? "🚨" : "🔓";
-  else if (type === "block") emoji = "🚫";
+  // ---- Emoji ----
+  const emoji = {
+    message: "💬",
+    presence: "🟢",
+    offline: "🔴",
+    login: isJarifLogin ? "🚨" : "🔓",
+    block: "🚫",
+  }[type] || "ℹ️";
 
-  // ---- Format final message ----
   const bahrainTime = formatBahrainTime();
-  const header = `${emoji} <b>${title}</b>`;
-  const footer = `🕒 <i>${bahrainTime} (Bahrain)</i>`;
-  const fullMessage = `${header}\n\n${description}\n\n${footer}`;
+  const fullMessage = `${emoji} <b>${title}</b>\n\n${description}\n\n🕒 <i>${bahrainTime} (Bahrain)</i>`;
 
   await sendTelegramMessage(fullMessage, "HTML");
 }
 
-// ---------- PRESENCE / ACTIVITY CHECK (Fidha) ----------
+// ---------- JARIF PRESENCE CHECK ----------
 async function checkJarifPresence() {
   try {
-    const presenceSnap = await db
-      .ref(`ephemeral/presence/${USER_JARIF}`)
-      .once("value");
-    const jarifPresence = presenceSnap.val();
-
-    if (!jarifPresence) {
+    const snap = await db.ref(`ephemeral/presence/${USER_JARIF}`).once("value");
+    const val = snap.val();
+    if (!val) {
       jarifIsActuallyOffline = true;
       return;
     }
-
-    const isOnline = jarifPresence.online === true;
-    const lastHeartbeat = jarifPresence.heartbeat || 0;
-    const timeSinceHeartbeat = Date.now() - lastHeartbeat;
-
-    jarifIsActuallyOffline = !isOnline || timeSinceHeartbeat > 60000;
+    const isOnline = val.online === true;
+    const heartbeat = val.heartbeat || 0;
+    jarifIsActuallyOffline = !isOnline || Date.now() - heartbeat > 60000;
   } catch (error) {
-    console.error(`❌ checkJarifPresence error: ${error.message}`);
+    console.error(`❌ checkJarifPresence: ${error.message}`);
     jarifIsActuallyOffline = true;
   }
 }
 
+// ---------- FIDHA ACTIVITY (ONLINE / OFFLINE) ----------
 async function checkActivityForNotification(isActive) {
-  console.log(`👤 Fidha presence: ${isActive ? "online" : "offline"}`);
   await checkJarifPresence();
+  if (!jarifIsActuallyOffline) return; // only notify if Jarif is offline
 
-  if (!jarifIsActuallyOffline) {
-    console.log(`⏭️ Jarif is online – skipping presence notification`);
-    return;
-  }
-
-  // Fetch Jarif's notification settings
-  let jarifSettings;
+  // Get Jarif's notification settings
+  let settings;
   try {
-    const settingsSnap = await db
-      .ref(`ephemeral/notificationSettings/${USER_JARIF}`)
-      .once("value");
-    jarifSettings = settingsSnap.val() || {
-      activityNotifications: true,
-      offlineNotifications: true,
-    };
+    const snap = await db.ref(`ephemeral/notificationSettings/${USER_JARIF}`).once("value");
+    settings = snap.val() || {};
   } catch {
-    jarifSettings = { activityNotifications: true, offlineNotifications: true };
+    settings = {};
   }
 
   const nowOnline = isActive;
-  const bahrainDateTime = formatBahrainDateTime();
+  const dateTime = formatBahrainDateTime();
 
-  // Offline event
   if (previousFiOnlineState && !nowOnline) {
-    if (jarifSettings.offlineNotifications) {
-      await sendNotification(
-        "Fi✨ went offline",
-        `**Time:** ${bahrainDateTime}`,
-        "offline",
-      );
+    // went offline
+    if (settings.offlineNotifications !== false) {
+      await sendNotification("Fi✨ went offline", `📅 <b>Time:</b> ${dateTime}`, "offline");
     }
-  }
-  // Online event
-  else if (!previousFiOnlineState && nowOnline) {
-    if (jarifSettings.activityNotifications) {
-      await sendNotification(
-        "Fi✨ is now active",
-        `**Time:** ${bahrainDateTime}`,
-        "presence",
-      );
+  } else if (!previousFiOnlineState && nowOnline) {
+    // came online
+    if (settings.activityNotifications !== false) {
+      await sendNotification("Fi✨ is now active", `📅 <b>Time:</b> ${dateTime}`, "presence");
     }
   }
 
   previousFiOnlineState = nowOnline;
 }
 
-// ---------- MESSAGE NOTIFICATION (Fidha → Jarif when offline) ----------
+// ---------- FIDHA'S MESSAGES (WHEN JARIF OFFLINE) ----------
 async function checkMessageForNotification(message) {
-  if (message.sender !== USER_FIDHA) {
-    return; // only notify for Fidha's messages
-  }
+  if (message.sender !== USER_FIDHA) return;
 
   await checkJarifPresence();
-  if (!jarifIsActuallyOffline) {
-    console.log(`⏭️ Jarif is online – skipping message notification`);
-    return;
-  }
+  if (!jarifIsActuallyOffline) return;
 
-  // Check if message already processed
-  if (processedMessageIds.has(message.id)) {
-    console.log(`⏭️ Duplicate message ID: ${message.id}`);
-    return;
-  }
+  if (processedMessageIds.has(message.id)) return;
 
-  // Check Jarif's notification settings
-  let jarifSettings;
+  // Get Jarif's notification settings
+  let settings;
   try {
-    const settingsSnap = await db
-      .ref(`ephemeral/notificationSettings/${USER_JARIF}`)
-      .once("value");
-    jarifSettings = settingsSnap.val();
+    const snap = await db.ref(`ephemeral/notificationSettings/${USER_JARIF}`).once("value");
+    settings = snap.val();
   } catch {
-    jarifSettings = null;
+    settings = null;
   }
 
-  if (!jarifSettings) {
-    jarifSettings = {
-      messageNotifications: true,
-      activityNotifications: true,
-      offlineNotifications: true,
-    };
-    await db
-      .ref(`ephemeral/notificationSettings/${USER_JARIF}`)
-      .set(jarifSettings);
+  if (!settings) {
+    // create default
+    settings = { messageNotifications: true, activityNotifications: true, offlineNotifications: true };
+    await db.ref(`ephemeral/notificationSettings/${USER_JARIF}`).set(settings);
   }
 
-  if (!jarifSettings.messageNotifications) {
-    console.log(`⏭️ Message notifications disabled for Jarif`);
-    return;
-  }
+  if (!settings.messageNotifications) return;
 
-  // Skip if message is saved or read by Jarif
+  // Skip if already saved/read by Jarif
   if (
     (message.savedBy && message.savedBy[USER_JARIF]) ||
     (message.readBy && message.readBy[USER_JARIF])
-  ) {
-    console.log(`⏭️ Message already saved/read by Jarif`);
-    return;
-  }
+  ) return;
 
   // Format content
-  let messageContent;
+  let content;
   if (message.text) {
-    messageContent = message.text;
+    content = message.text;
   } else if (message.attachment) {
-    if (message.attachment.isVoiceMessage) {
-      messageContent = "🎤 Voice message";
-    } else if (message.attachment.type?.startsWith("image/")) {
-      messageContent = "🖼️ Image";
-    } else if (message.attachment.type?.startsWith("video/")) {
-      messageContent = "🎬 Video";
-    } else if (message.attachment.type?.startsWith("audio/")) {
-      messageContent = "🔊 Audio file";
-    } else {
-      messageContent = `📎 File: ${message.attachment.name || "Attachment"}`;
-    }
+    if (message.attachment.isVoiceMessage) content = "🎤 Voice message";
+    else if (message.attachment.type?.startsWith("image/")) content = "🖼️ Image";
+    else if (message.attachment.type?.startsWith("video/")) content = "🎬 Video";
+    else if (message.attachment.type?.startsWith("audio/")) content = "🔊 Audio file";
+    else content = `📎 File: ${message.attachment.name || "Attachment"}`;
   } else {
-    messageContent = "Empty message";
+    content = "Empty message";
   }
 
-  if (messageContent.length > 1000) {
-    messageContent = messageContent.substring(0, 1000) + "…";
-  }
+  if (content.length > 1000) content = content.slice(0, 1000) + "…";
 
-  const bahrainDateTime = formatBahrainDateTime(message.timestampFull);
+  const dateTime = formatBahrainDateTime(message.timestampFull);
 
   await sendNotification(
     "📩 New message from Fi✨",
-    `<b>Message:</b> ${messageContent}\n<b>Time:</b> ${bahrainDateTime}`,
-    "message",
+    `<b>Message:</b> ${content}\n<b>Time:</b> ${dateTime}`,
+    "message"
   );
 
   processedMessageIds.add(message.id);
+  // Keep set size manageable
   if (processedMessageIds.size > 1000) {
     const arr = Array.from(processedMessageIds);
-    processedMessageIds = new Set(arr.slice(-500));
+    processedMessageIds.clear();
+    arr.slice(-500).forEach((id) => processedMessageIds.add(id));
   }
 }
 
-// ---------- JARIF LOGIN NOTIFICATION (IMMEDIATE) ----------
+// ---------- JARIF LOGIN (IMMEDIATE) ----------
 async function checkJarifLoginForNotification(loginData) {
   const deviceInfo = loginData.deviceInfo || {};
   const deviceId = deviceInfo.deviceId || "unknown";
 
-  // Device cooldown (30 seconds)
+  // Device cooldown (30s)
   const now = Date.now();
   const lastTime = lastDeviceNotificationTimes.get(deviceId) || 0;
-  if (now - lastTime < DEVICE_NOTIFICATION_COOLDOWN) {
-    console.log(`⏭️ Device ${deviceId} still in cooldown`);
-    return;
-  }
+  if (now - lastTime < DEVICE_NOTIFICATION_COOLDOWN) return;
 
-  // Time‑window deduplication (1 minute)
+  // Time‑window dedup (1 minute)
   const timeWindow = Math.floor(now / 60000);
   const uniqueKey = `${deviceId}_${timeWindow}`;
-  if (processedJarifLoginIds.has(uniqueKey)) {
-    console.log(`⏭️ Duplicate Jarif login in this time window`);
-    return;
-  }
+  if (processedJarifLoginIds.has(uniqueKey)) return;
 
-  const bahrainDateTime = formatBahrainDateTime(loginData.timestamp || now);
+  const dateTime = formatBahrainDateTime(loginData.timestamp || now);
 
-  let deviceDetails = `<b>Device Model:</b> ${deviceInfo.deviceModel || "Unknown"}\n`;
-  deviceDetails += `<b>Device Type:</b> ${deviceInfo.deviceType || "Unknown"}\n`;
-  deviceDetails += `<b>Platform:</b> ${deviceInfo.platform || "Unknown"}\n`;
-  deviceDetails += `<b>Screen:</b> ${deviceInfo.screenSize || "Unknown"}\n`;
-  deviceDetails += `<b>Window:</b> ${deviceInfo.windowSize || "Unknown"}\n`;
-  deviceDetails += `<b>Device ID:</b> <code>${deviceId}</code>\n`;
-  deviceDetails += `<b>Timezone:</b> ${deviceInfo.timezone || "Unknown"}\n`;
+  let details = `<b>Device Model:</b> ${deviceInfo.deviceModel || "Unknown"}\n`;
+  details += `<b>Device Type:</b> ${deviceInfo.deviceType || "Unknown"}\n`;
+  details += `<b>Platform:</b> ${deviceInfo.platform || "Unknown"}\n`;
+  details += `<b>Screen:</b> ${deviceInfo.screenSize || "Unknown"}\n`;
+  details += `<b>Window:</b> ${deviceInfo.windowSize || "Unknown"}\n`;
+  details += `<b>Device ID:</b> <code>${deviceId}</code>\n`;
+  details += `<b>Timezone:</b> ${deviceInfo.timezone || "Unknown"}\n`;
 
-  const userAgent = deviceInfo.userAgent || "Unknown";
-  const safeUserAgent =
-    userAgent.length > 800 ? userAgent.substring(0, 800) + "…" : userAgent;
-  deviceDetails += `<b>Browser:</b> ${safeUserAgent}`;
+  const ua = deviceInfo.userAgent || "Unknown";
+  details += `<b>Browser:</b> ${ua.length > 800 ? ua.slice(0, 800) + "…" : ua}`;
 
   await sendNotification(
     "🚨 Jarif logged in",
-    deviceDetails + `\n\n<b>Login Time:</b> ${bahrainDateTime}`,
+    details + `\n\n<b>Login Time:</b> ${dateTime}`,
     "login",
-    true, // isJarifLogin = true (bypass cooldown)
+    true // isJarifLogin – bypass cooldown
   );
 
-  // Update tracking
   lastDeviceNotificationTimes.set(deviceId, now);
   processedJarifLoginIds.add(uniqueKey);
 
-  // Cleanup old device entries (keep 50 most recent)
+  // Clean old device entries (keep 50 most recent)
   if (lastDeviceNotificationTimes.size > 100) {
-    const entries = Array.from(lastDeviceNotificationTimes.entries());
-    entries.sort((a, b) => b[1] - a[1]); // descending
-    const recent = entries.slice(0, 50);
+    const entries = Array.from(lastDeviceNotificationTimes.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 50);
     lastDeviceNotificationTimes.clear();
-    recent.forEach(([k, v]) => lastDeviceNotificationTimes.set(k, v));
+    entries.forEach(([k, v]) => lastDeviceNotificationTimes.set(k, v));
   }
 
-  // Cleanup login ID cache (keep last hour)
+  // Clean old processed IDs (keep last hour)
   if (processedJarifLoginIds.size > 100) {
     const oneHourAgo = now - 3600000;
-    const arr = Array.from(processedJarifLoginIds);
-    const recentIds = arr.filter((key) => {
+    const recent = Array.from(processedJarifLoginIds).filter((key) => {
       const [, ts] = key.split("_");
       return Number(ts) * 60000 > oneHourAgo;
     });
-    processedJarifLoginIds = new Set(recentIds);
+    processedJarifLoginIds.clear();
+    recent.forEach((k) => processedJarifLoginIds.add(k));
   }
 }
 
-// ---------- LOGIN PAGE ACCESS (non‑Jarif users) ----------
+// ---------- LOGIN PAGE ACCESS (NON‑JARIF) ----------
 async function checkLoginPageAccess(loginData) {
   const userId = loginData.userId || "Unknown user";
-  if (userId === USER_JARIF || userId.includes(USER_JARIF)) {
-    return; // Jarif's own access is handled separately
-  }
+  if (userId === USER_JARIF || userId.includes(USER_JARIF)) return;
 
-  const bahrainDateTime = formatBahrainDateTime(loginData.timestamp);
+  const dateTime = formatBahrainDateTime(loginData.timestamp);
 
   const deviceId = loginData.deviceId || "Unknown";
-  const deviceModel = loginData.deviceModel || "Unknown";
-  const deviceType = loginData.deviceType || "Unknown";
+  const model = loginData.deviceModel || "Unknown";
+  const type = loginData.deviceType || "Unknown";
   const platform = loginData.platform || "Unknown";
-  const screenSize = loginData.screenSize || "Unknown";
-  const windowSize = loginData.windowSize || "Unknown";
-  const userAgent = loginData.userAgent || "Unknown";
-  const safeUserAgent =
-    userAgent.length > 800 ? userAgent.substring(0, 800) + "…" : userAgent;
+  const screen = loginData.screenSize || "Unknown";
+  const window = loginData.windowSize || "Unknown";
+  const ua = loginData.userAgent || "Unknown";
 
-  const deviceInfo = `<b>Device ID:</b> <code>${deviceId}</code>\n<b>Model:</b> ${deviceModel} (${deviceType})\n<b>Platform:</b> ${platform}\n<b>Screen:</b> ${screenSize}\n<b>Window:</b> ${windowSize}`;
+  const deviceInfo = `<b>Device ID:</b> <code>${deviceId}</code>\n<b>Model:</b> ${model} (${type})\n<b>Platform:</b> ${platform}\n<b>Screen:</b> ${screen}\n<b>Window:</b> ${window}`;
 
   await sendNotification(
     "🔓 Login page accessed",
-    `<b>User:</b> ${userId}\n${deviceInfo}\n<b>User Agent:</b> ${safeUserAgent}\n<b>Time:</b> ${bahrainDateTime}`,
+    `<b>User:</b> ${userId}\n${deviceInfo}\n<b>User Agent:</b> ${ua.length > 800 ? ua.slice(0, 800) + "…" : ua}\n<b>Time:</b> ${dateTime}`,
     "login",
-    false,
+    false
   );
 }
 
-// ---------- FIREBASE LISTENERS ----------
+// ---------- FIREBASE LISTENERS (NO SPAM LOGS) ----------
 function startFirebaseListeners() {
-  console.log("🔥 Starting Firebase listeners...");
+  console.log("🔥 Starting Firebase listeners (Telegram mode)...");
 
-  // --- Messages ---
+  // --- Messages: only process recent messages, ignore edits ---
   const messagesRef = db.ref("ephemeral/messages");
   messagesRef.on("child_added", async (snapshot) => {
-    const message = snapshot.val();
-    if (!message) return;
-    message.id = snapshot.key;
+    const msg = snapshot.val();
+    if (!msg) return;
+    msg.id = snapshot.key;
 
-    // Log to console
-    const sender = message.sender === USER_FIDHA ? "Fi✨" : "7uvjx";
-    const content =
-      message.text || (message.attachment ? "Attachment" : "Empty");
-    console.log(`📨 [MESSAGE] ${sender}: ${content}`);
+    // Only consider messages from last 5 minutes
+    const msgTime = msg.timestampFull || Date.now();
+    if (Date.now() - msgTime > 5 * 60 * 1000) return;
 
-    // Only consider recent messages (last 5 minutes)
-    const msgTime = message.timestampFull || Date.now();
-    if (Date.now() - msgTime < 5 * 60 * 1000) {
-      await checkMessageForNotification(message);
-    }
+    await checkMessageForNotification(msg);
   });
 
-  // --- Fidha presence ---
-  let lastFiPresenceState = null;
+  // --- Fidha presence (only state changes) ---
+  let lastFiState = null;
   db.ref("ephemeral/presence/Fidha").on("value", async (snapshot) => {
     const val = snapshot.val();
     const isActive = val ? val.online === true : false;
-    if (lastFiPresenceState === isActive) return;
-    lastFiPresenceState = isActive;
+    if (lastFiState === isActive) return;
+    lastFiState = isActive;
     await checkActivityForNotification(isActive);
   });
 
@@ -474,24 +405,24 @@ function startFirebaseListeners() {
     const val = snapshot.val();
     if (val) {
       const isOnline = val.online === true;
-      const heartbeat = val.heartbeat || 0;
-      jarifIsActuallyOffline = !isOnline || Date.now() - heartbeat > 60000;
+      const hb = val.heartbeat || 0;
+      jarifIsActuallyOffline = !isOnline || Date.now() - hb > 60000;
     } else {
       jarifIsActuallyOffline = true;
     }
   });
 
-  // --- Login page access (ephemeral/loginAccess) ---
+  // --- Login page access ---
   const loginAccessRef = db.ref("ephemeral/loginAccess");
   loginAccessRef.on("child_added", async (snapshot) => {
     const data = snapshot.val();
     if (!data) return;
     await checkLoginPageAccess(data);
-    // Clean up after 1 second
+    // Clean immediately
     setTimeout(() => snapshot.ref.remove().catch(() => {}), 1000);
   });
 
-  // --- Jarif explicit logins (ephemeral/jarifLogins) ---
+  // --- Jarif explicit logins ---
   const jarifLoginRef = db.ref("ephemeral/jarifLogins");
   jarifLoginRef.on("child_added", async (snapshot) => {
     const data = snapshot.val();
@@ -499,57 +430,49 @@ function startFirebaseListeners() {
     data.id = snapshot.key;
     console.log("🚨 Jarif login event detected");
     await checkJarifLoginForNotification(data);
-    // Clean up after 30 seconds
+    // Clean after 30 seconds
     setTimeout(() => snapshot.ref.remove().catch(() => {}), 30000);
   });
 
-  // --- Blocked devices (log only) ---
+  // --- Blocked devices – log only, no notification ---
   db.ref("ephemeral/blockedDevices").on("child_added", (snapshot) => {
-    const blocked = snapshot.val();
-    if (blocked?.deviceId) {
-      console.log(`🚫 Device blocked: ${blocked.deviceId}`);
+    const block = snapshot.val();
+    if (block?.deviceId) {
+      console.log(`🚫 Device blocked: ${block.deviceId}`);
     }
   });
 }
 
 // ---------- PERIODIC CLEANUP ----------
-// Clean old loginAccess records every 5 minutes
 setInterval(async () => {
-  const loginAccessRef = db.ref("ephemeral/loginAccess");
-  const snapshot = await loginAccessRef.once("value");
-  const records = snapshot.val();
+  const ref = db.ref("ephemeral/loginAccess");
+  const snap = await ref.once("value");
+  const records = snap.val();
   if (!records) return;
   const fiveMinAgo = Date.now() - 300000;
   Object.keys(records).forEach((key) => {
     if (records[key].timestamp && records[key].timestamp < fiveMinAgo) {
-      loginAccessRef
-        .child(key)
-        .remove()
-        .catch(() => {});
+      ref.child(key).remove().catch(() => {});
     }
   });
-}, 300000);
+}, 300000); // every 5 min
 
-// Clean old device notification entries every 5 minutes
 setInterval(() => {
   const oneHourAgo = Date.now() - 3600000;
   let count = 0;
-  for (const [deviceId, ts] of lastDeviceNotificationTimes.entries()) {
+  for (const [dev, ts] of lastDeviceNotificationTimes.entries()) {
     if (ts < oneHourAgo) {
-      lastDeviceNotificationTimes.delete(deviceId);
+      lastDeviceNotificationTimes.delete(dev);
       count++;
     }
   }
   if (count > 0) console.log(`🧹 Cleaned ${count} old device entries`);
-}, 300000);
+}, 300000); // every 5 min
 
-// Check Jarif presence every 30 seconds
-setInterval(checkJarifPresence, 30000);
+setInterval(checkJarifPresence, 30000); // every 30 sec
 
-// ---------- EXPRESS SERVER ----------
-app.get("/", (req, res) =>
-  res.send("Telegram Notification Server is running."),
-);
+// ---------- EXPRESS ENDPOINTS ----------
+app.get("/", (req, res) => res.send("Telegram Notification Server is running."));
 app.get("/health", (req, res) => res.send("OK"));
 app.get("/status", (req, res) => {
   res.json({
@@ -557,15 +480,14 @@ app.get("/status", (req, res) => {
     telegram: TELEGRAM_BOT_TOKEN ? "configured" : "missing",
     chatId: TELEGRAM_CHAT_ID ? "configured" : "missing",
     cooldowns: {
-      message: `${MESSAGE_COOLDOWN}ms`,
-      presence: `${PRESENCE_COOLDOWN}ms`,
-      device: `${DEVICE_NOTIFICATION_COOLDOWN}ms`,
+      message: MESSAGE_COOLDOWN,
+      presence: PRESENCE_COOLDOWN,
+      device: DEVICE_NOTIFICATION_COOLDOWN,
     },
     devicesTracked: lastDeviceNotificationTimes.size,
   });
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log("=========================================");
   console.log("🚀 TELEGRAM NOTIFICATION SERVER STARTED");
@@ -573,9 +495,11 @@ app.listen(PORT, () => {
   console.log(`   Port: ${PORT}`);
   console.log(`   Bot Token: ${TELEGRAM_BOT_TOKEN ? "✓" : "✗"}`);
   console.log(`   Chat ID: ${TELEGRAM_CHAT_ID ? "✓" : "✗"}`);
+  console.log(`   Database URL: ${FIREBASE_DATABASE_URL}`);
   console.log("=========================================");
 });
 
+// Graceful shutdown
 process.on("SIGTERM", () => process.exit(0));
 process.on("SIGINT", () => process.exit(0));
 process.on("uncaughtException", (err) => {

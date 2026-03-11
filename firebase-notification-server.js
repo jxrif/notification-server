@@ -14,14 +14,15 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const DISCORD_IMP_WEBHOOK_URL = process.env.DISCORD_IMP_WEBHOOK_URL;
 let DISCORD_WEBHOOK_ID = null;
 let DISCORD_WEBHOOK_TOKEN = null;
+
 if (DISCORD_IMP_WEBHOOK_URL) {
   const parts = DISCORD_IMP_WEBHOOK_URL.match(/\/webhooks\/(\d+)\/([^\/]+)/);
   if (parts) {
     DISCORD_WEBHOOK_ID = parts[1];
     DISCORD_WEBHOOK_TOKEN = parts[2];
-    console.log("✅ Discord webhook parsed successfully.");
+    console.log("✅ Discord webhook parsed successfully (auto‑delete enabled).");
   } else {
-    console.warn("⚠️ Could not parse Discord webhook URL – auto‑delete will not work.");
+    console.warn("⚠️ Could not parse Discord webhook URL – auto‑delete will not work, but messages will still be sent.");
   }
 }
 
@@ -185,13 +186,23 @@ async function sendDiscordPlainText(text) {
       return;
     }
 
-    // Get the message ID from the response to schedule deletion
-    const responseData = await response.json();
-    const messageId = responseData.id;
-    console.log(`✅ Discord /imp notification sent. Message ID: ${messageId}`);
+    // Try to get the message ID from the response to schedule deletion
+    let messageId = null;
+    try {
+      const responseData = await response.json();
+      messageId = responseData.id;
+    } catch (jsonError) {
+      // If response is not JSON or empty, we can't get the ID – log a warning but continue
+      console.warn("⚠️ Discord response was not valid JSON – cannot auto‑delete message.");
+    }
 
-    // Schedule deletion after 10 minutes
-    setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
+    if (messageId) {
+      console.log(`✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`);
+      // Schedule deletion after 10 minutes
+      setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
+    } else {
+      console.log("✅ Discord /imp notification sent (auto‑delete not available).");
+    }
   } catch (error) {
     if (error.name === "AbortError") {
       console.error("⏱️ Discord request timeout.");
@@ -212,12 +223,15 @@ async function deleteDiscordMessage(messageId) {
 
   try {
     const response = await fetch(url, { method: "DELETE" });
+
     if (response.ok) {
       console.log(`✅ Discord message ${messageId} deleted after 10 minutes.`);
     } else if (response.status === 404) {
-      console.log(`ℹ️ Discord message ${messageId} already deleted or not found.`);
+      // Message already deleted or never existed – ignore quietly
+      console.log(`ℹ️ Discord message ${messageId} already deleted or not found (nothing to do).`);
     } else {
-      console.error(`❌ Failed to delete Discord message ${messageId}: ${response.status}`);
+      const errorText = await response.text();
+      console.error(`❌ Failed to delete Discord message ${messageId}: ${response.status} – ${errorText}`);
     }
   } catch (err) {
     console.error(`❌ Error deleting Discord message: ${err.message}`);
@@ -388,7 +402,7 @@ async function checkMessageForNotification(message) {
   }
 }
 
-// ---------- NEW: /imp message to Discord ----------
+// ---------- /imp message to Discord ----------
 async function checkImpMessageForDiscord(message) {
   // Check if message starts with "/imp"
   if (!message.text || !message.text.startsWith("/imp")) return;
@@ -512,7 +526,7 @@ function startFirebaseListeners() {
     // --- Existing Fidha notification check ---
     await checkMessageForNotification(msg);
 
-    // --- NEW: /imp Discord notification check (any sender) ---
+    // --- /imp Discord notification check (any sender) ---
     await checkImpMessageForDiscord(msg);
   });
 

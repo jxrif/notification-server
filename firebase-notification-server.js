@@ -12,6 +12,18 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 // ---------- DISCORD (for /imp messages) ----------
 const DISCORD_IMP_WEBHOOK_URL = process.env.DISCORD_IMP_WEBHOOK_URL;
+let DISCORD_WEBHOOK_ID = null;
+let DISCORD_WEBHOOK_TOKEN = null;
+if (DISCORD_IMP_WEBHOOK_URL) {
+  const parts = DISCORD_IMP_WEBHOOK_URL.match(/\/webhooks\/(\d+)\/([^\/]+)/);
+  if (parts) {
+    DISCORD_WEBHOOK_ID = parts[1];
+    DISCORD_WEBHOOK_TOKEN = parts[2];
+    console.log("✅ Discord webhook parsed successfully.");
+  } else {
+    console.warn("⚠️ Could not parse Discord webhook URL – auto‑delete will not work.");
+  }
+}
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("❌ CRITICAL: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set.");
@@ -145,7 +157,7 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
   console.error("❌ Failed to send Telegram message after multiple attempts.");
 }
 
-// ---------- DISCORD PLAIN TEXT SEND (for /imp messages) ----------
+// ---------- DISCORD PLAIN TEXT SEND (for /imp messages) with auto‑delete after 10 minutes ----------
 async function sendDiscordPlainText(text) {
   if (!DISCORD_IMP_WEBHOOK_URL) {
     console.warn("⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.");
@@ -170,15 +182,45 @@ async function sendDiscordPlainText(text) {
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`❌ Discord webhook error (${response.status}): ${errorText}`);
-    } else {
-      console.log("✅ Discord /imp notification sent.");
+      return;
     }
+
+    // Get the message ID from the response to schedule deletion
+    const responseData = await response.json();
+    const messageId = responseData.id;
+    console.log(`✅ Discord /imp notification sent. Message ID: ${messageId}`);
+
+    // Schedule deletion after 10 minutes
+    setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
   } catch (error) {
     if (error.name === "AbortError") {
       console.error("⏱️ Discord request timeout.");
     } else {
       console.error(`🔥 Discord network error: ${error.message}`);
     }
+  }
+}
+
+// Delete a Discord message using the webhook
+async function deleteDiscordMessage(messageId) {
+  if (!DISCORD_WEBHOOK_ID || !DISCORD_WEBHOOK_TOKEN) {
+    console.warn("⚠️ Discord webhook ID/token missing – cannot delete message.");
+    return;
+  }
+
+  const url = `https://discord.com/api/webhooks/${DISCORD_WEBHOOK_ID}/${DISCORD_WEBHOOK_TOKEN}/messages/${messageId}`;
+
+  try {
+    const response = await fetch(url, { method: "DELETE" });
+    if (response.ok) {
+      console.log(`✅ Discord message ${messageId} deleted after 10 minutes.`);
+    } else if (response.status === 404) {
+      console.log(`ℹ️ Discord message ${messageId} already deleted or not found.`);
+    } else {
+      console.error(`❌ Failed to delete Discord message ${messageId}: ${response.status}`);
+    }
+  } catch (err) {
+    console.error(`❌ Error deleting Discord message: ${err.message}`);
   }
 }
 

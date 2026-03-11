@@ -165,13 +165,17 @@ async function sendDiscordPlainText(text) {
     return;
   }
 
+  // Build URL with ?wait=true to get the message ID
+  const url = new URL(DISCORD_IMP_WEBHOOK_URL);
+  url.searchParams.set("wait", "true");
+
   const payload = { content: text }; // plain text only
 
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-    const response = await fetch(DISCORD_IMP_WEBHOOK_URL, {
+    const response = await fetch(url.toString(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -186,14 +190,14 @@ async function sendDiscordPlainText(text) {
       return;
     }
 
-    // Try to get the message ID from the response to schedule deletion
+    // Discord should now return the message object because of ?wait=true
     let messageId = null;
     try {
       const responseData = await response.json();
       messageId = responseData.id;
     } catch (jsonError) {
-      // If response is not JSON or empty, we can't get the ID – log a warning but continue
-      console.warn("⚠️ Discord response was not valid JSON – cannot auto‑delete message.");
+      console.error("❌ Failed to parse Discord response JSON even with ?wait=true:", jsonError.message);
+      return;
     }
 
     if (messageId) {
@@ -201,7 +205,7 @@ async function sendDiscordPlainText(text) {
       // Schedule deletion after 10 minutes
       setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
     } else {
-      console.log("✅ Discord /imp notification sent (auto‑delete not available).");
+      console.log("✅ Discord /imp notification sent but no message ID returned (auto‑delete not available).");
     }
   } catch (error) {
     if (error.name === "AbortError") {

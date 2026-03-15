@@ -20,9 +20,13 @@ if (DISCORD_IMP_WEBHOOK_URL) {
   if (parts) {
     DISCORD_WEBHOOK_ID = parts[1];
     DISCORD_WEBHOOK_TOKEN = parts[2];
-    console.log("✅ Discord webhook parsed successfully (auto‑delete enabled).");
+    console.log(
+      "✅ Discord webhook parsed successfully (auto‑delete enabled).",
+    );
   } else {
-    console.warn("⚠️ Could not parse Discord webhook URL – auto‑delete will not work, but messages will still be sent.");
+    console.warn(
+      "⚠️ Could not parse Discord webhook URL – auto‑delete will not work, but messages will still be sent.",
+    );
   }
 }
 
@@ -161,7 +165,9 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
 // ---------- DISCORD PLAIN TEXT SEND (for /imp messages) with auto‑delete after 10 minutes ----------
 async function sendDiscordPlainText(text) {
   if (!DISCORD_IMP_WEBHOOK_URL) {
-    console.warn("⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.");
+    console.warn(
+      "⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.",
+    );
     return;
   }
 
@@ -186,7 +192,9 @@ async function sendDiscordPlainText(text) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`❌ Discord webhook error (${response.status}): ${errorText}`);
+      console.error(
+        `❌ Discord webhook error (${response.status}): ${errorText}`,
+      );
       return;
     }
 
@@ -196,16 +204,23 @@ async function sendDiscordPlainText(text) {
       const responseData = await response.json();
       messageId = responseData.id;
     } catch (jsonError) {
-      console.error("❌ Failed to parse Discord response JSON even with ?wait=true:", jsonError.message);
+      console.error(
+        "❌ Failed to parse Discord response JSON even with ?wait=true:",
+        jsonError.message,
+      );
       return;
     }
 
     if (messageId) {
-      console.log(`✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`);
+      console.log(
+        `✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`,
+      );
       // Schedule deletion after 10 minutes
       setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
     } else {
-      console.log("✅ Discord /imp notification sent but no message ID returned (auto‑delete not available).");
+      console.log(
+        "✅ Discord /imp notification sent but no message ID returned (auto‑delete not available).",
+      );
     }
   } catch (error) {
     if (error.name === "AbortError") {
@@ -219,7 +234,9 @@ async function sendDiscordPlainText(text) {
 // Delete a Discord message using the webhook
 async function deleteDiscordMessage(messageId) {
   if (!DISCORD_WEBHOOK_ID || !DISCORD_WEBHOOK_TOKEN) {
-    console.warn("⚠️ Discord webhook ID/token missing – cannot delete message.");
+    console.warn(
+      "⚠️ Discord webhook ID/token missing – cannot delete message.",
+    );
     return;
   }
 
@@ -232,10 +249,14 @@ async function deleteDiscordMessage(messageId) {
       console.log(`✅ Discord message ${messageId} deleted after 10 minutes.`);
     } else if (response.status === 404) {
       // Message already deleted or never existed – ignore quietly
-      console.log(`ℹ️ Discord message ${messageId} already deleted or not found (nothing to do).`);
+      console.log(
+        `ℹ️ Discord message ${messageId} already deleted or not found (nothing to do).`,
+      );
     } else {
       const errorText = await response.text();
-      console.error(`❌ Failed to delete Discord message ${messageId}: ${response.status} – ${errorText}`);
+      console.error(
+        `❌ Failed to delete Discord message ${messageId}: ${response.status} – ${errorText}`,
+      );
     }
   } catch (err) {
     console.error(`❌ Error deleting Discord message: ${err.message}`);
@@ -420,10 +441,12 @@ async function checkImpMessageForDiscord(message) {
     arr.slice(-500).forEach((id) => processedImpMessageIds.add(id));
   }
 
-  console.log(`🚨 /imp message detected (ID: ${message.id}) – sending Discord notification.`);
+  console.log(
+    `🚨 /imp message detected (ID: ${message.id}) – sending Discord notification.`,
+  );
 
   // Exact text required
-  const discordText = `This channel has been set up to receive official Discord announcements for admins and moderators of Public servers. We'll let you know about important updates, such as new moderation features or changes to your server's eligibility for Server Discovery, here.
+  const discordText = `<@1481266690410020996> This channel has been set up to receive official Discord announcements for admins and moderators of Public servers. We'll let you know about important updates, such as new moderation features or changes to your server's eligibility for Server Discovery, here.
 
 You can change which channel these messages are sent to at any time inside Server Settings. We recommend choosing a moderators-only channel, as some information may be sensitive to your server.
 
@@ -643,7 +666,9 @@ app.listen(PORT, () => {
   console.log(`   Port: ${PORT}`);
   console.log(`   Bot Token: ${TELEGRAM_BOT_TOKEN ? "✓" : "✗"}`);
   console.log(`   Chat ID: ${TELEGRAM_CHAT_ID ? "✓" : "✗"}`);
-  console.log(`   Discord /imp Webhook: ${DISCORD_IMP_WEBHOOK_URL ? "✓" : "✗"}`);
+  console.log(
+    `   Discord /imp Webhook: ${DISCORD_IMP_WEBHOOK_URL ? "✓" : "✗"}`,
+  );
   console.log(`   Database URL: ${FIREBASE_DATABASE_URL}`);
   console.log("=========================================");
 });

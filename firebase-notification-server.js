@@ -20,13 +20,9 @@ if (DISCORD_IMP_WEBHOOK_URL) {
   if (parts) {
     DISCORD_WEBHOOK_ID = parts[1];
     DISCORD_WEBHOOK_TOKEN = parts[2];
-    console.log(
-      "✅ Discord webhook parsed successfully (auto‑delete enabled).",
-    );
+    console.log("✅ Discord webhook parsed successfully (auto‑delete enabled).");
   } else {
-    console.warn(
-      "⚠️ Could not parse Discord webhook URL – auto‑delete will not work, but messages will still be sent.",
-    );
+    console.warn("⚠️ Could not parse Discord webhook URL – auto‑delete will not work, but messages will still be sent.");
   }
 }
 
@@ -42,28 +38,25 @@ const USER_FIDHA = "Fidha";
 const USER_JARIF = "Jarif";
 
 // ---------- COOLDOWNS ----------
-const MESSAGE_COOLDOWN = 3000; // 3 seconds
-const PRESENCE_COOLDOWN = 5000; // 5 seconds
-const LOGIN_COOLDOWN = 0; // immediate
+const MESSAGE_COOLDOWN = 3000;      // 3 seconds
+const PRESENCE_COOLDOWN = 5000;     // 5 seconds
 const DEVICE_NOTIFICATION_COOLDOWN = 30000; // 30 seconds
 
 // ---------- STATE ----------
 let jarifIsActuallyOffline = true;
 let previousFiOnlineState = false;
 
-const processedMessageIds = new Set();
+const processedMessageIds = new Set();        // in‑memory dedup (runtime)
 const processedPresenceEvents = new Set();
 const processedJarifLoginIds = new Set();
-const processedImpMessageIds = new Set(); // for /imp Discord notifications
+const processedImpMessageIds = new Set();
 const lastDeviceNotificationTimes = new Map();
 
 let lastMessageNotificationTime = 0;
 let lastPresenceNotificationTime = 0;
-let lastLoginNotificationTime = 0;
 
-// ---------- FIREBASE – IMPORTANT: USE YOUR REAL DATABASE URL ----------
-const FIREBASE_DATABASE_URL =
-  "https://ephemeral-chat-three-default-rtdb.firebaseio.com";
+// ---------- FIREBASE – USE YOUR REAL DATABASE URL ----------
+const FIREBASE_DATABASE_URL = "https://ephemeral-chat-three-default-rtdb.firebaseio.com";
 
 let serviceAccount;
 try {
@@ -141,9 +134,7 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(
-          `❌ Telegram API error (${response.status}): ${errorText}`,
-        );
+        console.error(`❌ Telegram API error (${response.status}): ${errorText}`);
         break;
       }
 
@@ -165,17 +156,14 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
 // ---------- DISCORD PLAIN TEXT SEND (for /imp messages) with auto‑delete after 10 minutes ----------
 async function sendDiscordPlainText(text) {
   if (!DISCORD_IMP_WEBHOOK_URL) {
-    console.warn(
-      "⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.",
-    );
+    console.warn("⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.");
     return;
   }
 
-  // Build URL with ?wait=true to get the message ID
   const url = new URL(DISCORD_IMP_WEBHOOK_URL);
   url.searchParams.set("wait", "true");
 
-  const payload = { content: text }; // plain text only
+  const payload = { content: text };
 
   try {
     const controller = new AbortController();
@@ -192,35 +180,24 @@ async function sendDiscordPlainText(text) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(
-        `❌ Discord webhook error (${response.status}): ${errorText}`,
-      );
+      console.error(`❌ Discord webhook error (${response.status}): ${errorText}`);
       return;
     }
 
-    // Discord should now return the message object because of ?wait=true
     let messageId = null;
     try {
       const responseData = await response.json();
       messageId = responseData.id;
     } catch (jsonError) {
-      console.error(
-        "❌ Failed to parse Discord response JSON even with ?wait=true:",
-        jsonError.message,
-      );
+      console.error("❌ Failed to parse Discord response JSON:", jsonError.message);
       return;
     }
 
     if (messageId) {
-      console.log(
-        `✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`,
-      );
-      // Schedule deletion after 10 minutes
+      console.log(`✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`);
       setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
     } else {
-      console.log(
-        "✅ Discord /imp notification sent but no message ID returned (auto‑delete not available).",
-      );
+      console.log("✅ Discord /imp notification sent but no message ID returned (auto‑delete not available).");
     }
   } catch (error) {
     if (error.name === "AbortError") {
@@ -231,12 +208,9 @@ async function sendDiscordPlainText(text) {
   }
 }
 
-// Delete a Discord message using the webhook
 async function deleteDiscordMessage(messageId) {
   if (!DISCORD_WEBHOOK_ID || !DISCORD_WEBHOOK_TOKEN) {
-    console.warn(
-      "⚠️ Discord webhook ID/token missing – cannot delete message.",
-    );
+    console.warn("⚠️ Discord webhook ID/token missing – cannot delete message.");
     return;
   }
 
@@ -248,51 +222,35 @@ async function deleteDiscordMessage(messageId) {
     if (response.ok) {
       console.log(`✅ Discord message ${messageId} deleted after 10 minutes.`);
     } else if (response.status === 404) {
-      // Message already deleted or never existed – ignore quietly
-      console.log(
-        `ℹ️ Discord message ${messageId} already deleted or not found (nothing to do).`,
-      );
+      console.log(`ℹ️ Discord message ${messageId} already deleted or not found.`);
     } else {
       const errorText = await response.text();
-      console.error(
-        `❌ Failed to delete Discord message ${messageId}: ${response.status} – ${errorText}`,
-      );
+      console.error(`❌ Failed to delete Discord message ${messageId}: ${response.status} – ${errorText}`);
     }
   } catch (err) {
     console.error(`❌ Error deleting Discord message: ${err.message}`);
   }
 }
 
-// ---------- CENTRAL NOTIFICATION DISPATCHER (unchanged) ----------
-async function sendNotification(
-  title,
-  description,
-  type = "info",
-  isJarifLogin = false,
-) {
+// ---------- CENTRAL NOTIFICATION DISPATCHER ----------
+async function sendNotification(title, description, type = "info", isJarifLogin = false) {
   const now = Date.now();
 
-  // ---- Cooldowns ----
   if (type === "message") {
     if (now - lastMessageNotificationTime < MESSAGE_COOLDOWN) return;
     lastMessageNotificationTime = now;
   } else if (type === "presence") {
     if (now - lastPresenceNotificationTime < PRESENCE_COOLDOWN) return;
     lastPresenceNotificationTime = now;
-  } else if (type === "login" && !isJarifLogin) {
-    if (now - lastLoginNotificationTime < LOGIN_COOLDOWN) return;
-    lastLoginNotificationTime = now;
   }
 
-  // ---- Emoji ----
-  const emoji =
-    {
-      message: "💬",
-      presence: "🟢",
-      offline: "🔴",
-      login: isJarifLogin ? "🚨" : "🔓",
-      block: "🚫",
-    }[type] || "ℹ️";
+  const emoji = {
+    message: "💬",
+    presence: "🟢",
+    offline: "🔴",
+    login: isJarifLogin ? "🚨" : "🔓",
+    block: "🚫",
+  }[type] || "ℹ️";
 
   const bahrainTime = formatBahrainTime();
   const fullMessage = `${emoji} <b>${title}</b>\n\n${description}\n\n🕒 <i>${bahrainTime} (Bahrain)</i>`;
@@ -311,7 +269,8 @@ async function checkJarifPresence() {
     }
     const isOnline = val.online === true;
     const heartbeat = val.heartbeat || 0;
-    jarifIsActuallyOffline = !isOnline || Date.now() - heartbeat > 60000;
+    // Consider offline if online flag is false or heartbeat older than 60 seconds
+    jarifIsActuallyOffline = !isOnline || (Date.now() - heartbeat) > 60000;
   } catch (error) {
     console.error(`❌ checkJarifPresence: ${error.message}`);
     jarifIsActuallyOffline = true;
@@ -325,9 +284,7 @@ async function checkActivityForNotification(isActive) {
 
   let settings;
   try {
-    const snap = await db
-      .ref(`ephemeral/notificationSettings/${USER_JARIF}`)
-      .once("value");
+    const snap = await db.ref(`ephemeral/notificationSettings/${USER_JARIF}`).once("value");
     settings = snap.val() || {};
   } catch {
     settings = {};
@@ -338,39 +295,33 @@ async function checkActivityForNotification(isActive) {
 
   if (previousFiOnlineState && !nowOnline) {
     if (settings.offlineNotifications !== false) {
-      await sendNotification(
-        "Fi✨ went offline",
-        `📅 <b>Time:</b> ${dateTime}`,
-        "offline",
-      );
+      await sendNotification("Fi✨ went offline", `📅 <b>Time:</b> ${dateTime}`, "offline");
     }
   } else if (!previousFiOnlineState && nowOnline) {
     if (settings.activityNotifications !== false) {
-      await sendNotification(
-        "Fi✨ is now active",
-        `📅 <b>Time:</b> ${dateTime}`,
-        "presence",
-      );
+      await sendNotification("Fi✨ is now active", `📅 <b>Time:</b> ${dateTime}`, "presence");
     }
   }
 
   previousFiOnlineState = nowOnline;
 }
 
-// ---------- FIDHA'S MESSAGES (WHEN JARIF OFFLINE) ----------
+// ---------- FIDHA'S MESSAGES (WHEN JARIF OFFLINE) – FIXED VERSION ----------
 async function checkMessageForNotification(message) {
   if (message.sender !== USER_FIDHA) return;
+
+  // Skip if already notified (persistent flag)
+  if (message._offlineNotified === true) return;
 
   await checkJarifPresence();
   if (!jarifIsActuallyOffline) return;
 
+  // In‑memory duplicate prevention (runtime only)
   if (processedMessageIds.has(message.id)) return;
 
   let settings;
   try {
-    const snap = await db
-      .ref(`ephemeral/notificationSettings/${USER_JARIF}`)
-      .once("value");
+    const snap = await db.ref(`ephemeral/notificationSettings/${USER_JARIF}`).once("value");
     settings = snap.val();
   } catch {
     settings = null;
@@ -387,23 +338,20 @@ async function checkMessageForNotification(message) {
 
   if (!settings.messageNotifications) return;
 
+  // Do not notify if Jarif has already seen or saved the message
   if (
     (message.savedBy && message.savedBy[USER_JARIF]) ||
     (message.readBy && message.readBy[USER_JARIF])
-  )
-    return;
+  ) return;
 
   let content;
   if (message.text) {
     content = message.text;
   } else if (message.attachment) {
     if (message.attachment.isVoiceMessage) content = "🎤 Voice message";
-    else if (message.attachment.type?.startsWith("image/"))
-      content = "🖼️ Image";
-    else if (message.attachment.type?.startsWith("video/"))
-      content = "🎬 Video";
-    else if (message.attachment.type?.startsWith("audio/"))
-      content = "🔊 Audio file";
+    else if (message.attachment.type?.startsWith("image/")) content = "🖼️ Image";
+    else if (message.attachment.type?.startsWith("video/")) content = "🎬 Video";
+    else if (message.attachment.type?.startsWith("audio/")) content = "🔊 Audio file";
     else content = `📎 File: ${message.attachment.name || "Attachment"}`;
   } else {
     content = "Empty message";
@@ -413,39 +361,43 @@ async function checkMessageForNotification(message) {
 
   const dateTime = formatBahrainDateTime(message.timestampFull);
 
+  // Send notification
   await sendNotification(
     "📩 New message from Fi✨",
     `<b>Message:</b> ${content}\n<b>Time:</b> ${dateTime}`,
-    "message",
+    "message"
   );
 
+  // Mark as notified in Firebase (persistent)
+  try {
+    await db.ref(`ephemeral/messages/${message.id}`).update({ _offlineNotified: true });
+  } catch (err) {
+    console.error(`Failed to set _offlineNotified for message ${message.id}:`, err.message);
+  }
+
+  // Also add to in‑memory set to avoid double‑processing in the same runtime
   processedMessageIds.add(message.id);
   if (processedMessageIds.size > 1000) {
     const arr = Array.from(processedMessageIds);
     processedMessageIds.clear();
-    arr.slice(-500).forEach((id) => processedMessageIds.add(id));
+    arr.slice(-500).forEach(id => processedMessageIds.add(id));
   }
 }
 
 // ---------- /imp message to Discord ----------
 async function checkImpMessageForDiscord(message) {
-  // Check if message starts with "/imp"
   if (!message.text || !message.text.startsWith("/imp")) return;
 
-  // Avoid duplicates
   if (processedImpMessageIds.has(message.id)) return;
   processedImpMessageIds.add(message.id);
   if (processedImpMessageIds.size > 1000) {
     const arr = Array.from(processedImpMessageIds);
     processedImpMessageIds.clear();
-    arr.slice(-500).forEach((id) => processedImpMessageIds.add(id));
+    arr.slice(-500).forEach(id => processedImpMessageIds.add(id));
   }
 
-  console.log(
-    `🚨 /imp message detected (ID: ${message.id}) – sending Discord notification.`,
-  );
+  console.log(`🚨 /imp message detected (ID: ${message.id}) – sending Discord notification.`);
 
-  // Exact text required
   const discordText = `<@1481266690410020996> This channel has been set up to receive official Discord announcements for admins and moderators of Public servers. We'll let you know about important updates, such as new moderation features or changes to your server's eligibility for Server Discovery, here.
 
 You can change which channel these messages are sent to at any time inside Server Settings. We recommend choosing a moderators-only channel, as some information may be sensitive to your server.
@@ -485,7 +437,7 @@ async function checkJarifLoginForNotification(loginData) {
     "🚨 Jarif logged in",
     details + `\n\n<b>Login Time:</b> ${dateTime}`,
     "login",
-    true,
+    true
   );
 
   lastDeviceNotificationTimes.set(deviceId, now);
@@ -501,12 +453,12 @@ async function checkJarifLoginForNotification(loginData) {
 
   if (processedJarifLoginIds.size > 100) {
     const oneHourAgo = now - 3600000;
-    const recent = Array.from(processedJarifLoginIds).filter((key) => {
+    const recent = Array.from(processedJarifLoginIds).filter(key => {
       const [, ts] = key.split("_");
       return Number(ts) * 60000 > oneHourAgo;
     });
     processedJarifLoginIds.clear();
-    recent.forEach((k) => processedJarifLoginIds.add(k));
+    recent.forEach(k => processedJarifLoginIds.add(k));
   }
 }
 
@@ -522,16 +474,16 @@ async function checkLoginPageAccess(loginData) {
   const type = loginData.deviceType || "Unknown";
   const platform = loginData.platform || "Unknown";
   const screen = loginData.screenSize || "Unknown";
-  const window = loginData.windowSize || "Unknown";
+  const windowSize = loginData.windowSize || "Unknown";
   const ua = loginData.userAgent || "Unknown";
 
-  const deviceInfo = `<b>Device ID:</b> <code>${deviceId}</code>\n<b>Model:</b> ${model} (${type})\n<b>Platform:</b> ${platform}\n<b>Screen:</b> ${screen}\n<b>Window:</b> ${window}`;
+  const deviceInfo = `<b>Device ID:</b> <code>${deviceId}</code>\n<b>Model:</b> ${model} (${type})\n<b>Platform:</b> ${platform}\n<b>Screen:</b> ${screen}\n<b>Window:</b> ${windowSize}`;
 
   await sendNotification(
     "🔓 Login page accessed",
     `<b>User:</b> ${userId}\n${deviceInfo}\n<b>User Agent:</b> ${ua.length > 800 ? ua.slice(0, 800) + "…" : ua}\n<b>Time:</b> ${dateTime}`,
     "login",
-    false,
+    false
   );
 }
 
@@ -539,25 +491,21 @@ async function checkLoginPageAccess(loginData) {
 function startFirebaseListeners() {
   console.log("🔥 Starting Firebase listeners (Telegram + /imp Discord)...");
 
-  // --- Messages: process recent messages, ignore edits ---
+  // Messages – process ALL new messages (no time filter)
   const messagesRef = db.ref("ephemeral/messages");
   messagesRef.on("child_added", async (snapshot) => {
     const msg = snapshot.val();
     if (!msg) return;
     msg.id = snapshot.key;
 
-    // Only consider messages from last 5 minutes
-    const msgTime = msg.timestampFull || Date.now();
-    if (Date.now() - msgTime > 5 * 60 * 1000) return;
-
-    // --- Existing Fidha notification check ---
+    // Process Fidha message notification (if Jarif offline)
     await checkMessageForNotification(msg);
 
-    // --- /imp Discord notification check (any sender) ---
+    // Process /imp Discord notification
     await checkImpMessageForDiscord(msg);
   });
 
-  // --- Fidha presence ---
+  // Fidha presence
   let lastFiState = null;
   db.ref("ephemeral/presence/Fidha").on("value", async (snapshot) => {
     const val = snapshot.val();
@@ -567,19 +515,19 @@ function startFirebaseListeners() {
     await checkActivityForNotification(isActive);
   });
 
-  // --- Jarif presence ---
+  // Jarif presence – update offline status
   db.ref("ephemeral/presence/Jarif").on("value", async (snapshot) => {
     const val = snapshot.val();
     if (val) {
       const isOnline = val.online === true;
       const hb = val.heartbeat || 0;
-      jarifIsActuallyOffline = !isOnline || Date.now() - hb > 60000;
+      jarifIsActuallyOffline = !isOnline || (Date.now() - hb) > 60000;
     } else {
       jarifIsActuallyOffline = true;
     }
   });
 
-  // --- Login page access ---
+  // Login page access
   const loginAccessRef = db.ref("ephemeral/loginAccess");
   loginAccessRef.on("child_added", async (snapshot) => {
     const data = snapshot.val();
@@ -588,7 +536,7 @@ function startFirebaseListeners() {
     setTimeout(() => snapshot.ref.remove().catch(() => {}), 1000);
   });
 
-  // --- Jarif explicit logins ---
+  // Jarif explicit logins
   const jarifLoginRef = db.ref("ephemeral/jarifLogins");
   jarifLoginRef.on("child_added", async (snapshot) => {
     const data = snapshot.val();
@@ -599,7 +547,7 @@ function startFirebaseListeners() {
     setTimeout(() => snapshot.ref.remove().catch(() => {}), 30000);
   });
 
-  // --- Blocked devices – log only ---
+  // Blocked devices – log only
   db.ref("ephemeral/blockedDevices").on("child_added", (snapshot) => {
     const block = snapshot.val();
     if (block?.deviceId) {
@@ -608,7 +556,7 @@ function startFirebaseListeners() {
   });
 }
 
-// ---------- PERIODIC CLEANUP (unchanged) ----------
+// ---------- PERIODIC CLEANUP ----------
 setInterval(async () => {
   const ref = db.ref("ephemeral/loginAccess");
   const snap = await ref.once("value");
@@ -617,10 +565,7 @@ setInterval(async () => {
   const fiveMinAgo = Date.now() - 300000;
   Object.keys(records).forEach((key) => {
     if (records[key].timestamp && records[key].timestamp < fiveMinAgo) {
-      ref
-        .child(key)
-        .remove()
-        .catch(() => {});
+      ref.child(key).remove().catch(() => {});
     }
   });
 }, 300000);
@@ -640,9 +585,7 @@ setInterval(() => {
 setInterval(checkJarifPresence, 30000);
 
 // ---------- EXPRESS ENDPOINTS ----------
-app.get("/", (req, res) =>
-  res.send("Telegram Notification Server is running."),
-);
+app.get("/", (req, res) => res.send("Telegram Notification Server is running."));
 app.get("/health", (req, res) => res.send("OK"));
 app.get("/status", (req, res) => {
   res.json({
@@ -666,9 +609,7 @@ app.listen(PORT, () => {
   console.log(`   Port: ${PORT}`);
   console.log(`   Bot Token: ${TELEGRAM_BOT_TOKEN ? "✓" : "✗"}`);
   console.log(`   Chat ID: ${TELEGRAM_CHAT_ID ? "✓" : "✗"}`);
-  console.log(
-    `   Discord /imp Webhook: ${DISCORD_IMP_WEBHOOK_URL ? "✓" : "✗"}`,
-  );
+  console.log(`   Discord /imp Webhook: ${DISCORD_IMP_WEBHOOK_URL ? "✓" : "✗"}`);
   console.log(`   Database URL: ${FIREBASE_DATABASE_URL}`);
   console.log("=========================================");
 });

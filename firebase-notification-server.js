@@ -1,10 +1,17 @@
 // firebase-notification-server.js
 const express = require("express");
 const admin = require("firebase-admin");
-const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Use built-in fetch on Node 18+, otherwise fall back to node-fetch
+const fetchFn = global.fetch
+  ? global.fetch.bind(global)
+  : async (...args) => {
+      const mod = await import("node-fetch");
+      return mod.default(...args);
+    };
 
 // ---------- TELEGRAM ----------
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -20,9 +27,11 @@ if (DISCORD_IMP_WEBHOOK_URL) {
   if (parts) {
     DISCORD_WEBHOOK_ID = parts[1];
     DISCORD_WEBHOOK_TOKEN = parts[2];
-    console.log("✅ Discord webhook parsed for auto‑delete.");
+    console.log("✅ Discord webhook parsed successfully.");
   } else {
-    console.warn("⚠️ Could not parse Discord webhook URL – auto‑delete will not work.");
+    console.warn(
+      "⚠️ Could not parse Discord webhook URL – auto-delete will not work.",
+    );
   }
 }
 
@@ -118,7 +127,7 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-      const response = await fetch(TELEGRAM_API_URL, {
+      const response = await fetchFn(TELEGRAM_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -137,7 +146,9 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ Telegram API error (${response.status}): ${errorText}`);
+        console.error(
+          `❌ Telegram API error (${response.status}): ${errorText}`,
+        );
         break;
       }
 
@@ -156,90 +167,122 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
   console.error("❌ Failed to send Telegram message after multiple attempts.");
 }
 
-// ---------- DISCORD SEND – SIMPLE & WORKING (like your test) ----------
+// ---------- DISCORD SEND (SINGLE ATTEMPT, NO RETRY LOOP) ----------
 async function sendDiscordPlainText(text) {
   if (!DISCORD_IMP_WEBHOOK_URL) {
-    console.warn("⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.");
+    console.warn(
+      "⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.",
+    );
     return;
   }
 
-  const url = DISCORD_IMP_WEBHOOK_URL.trim();
+  const url = new URL(DISCORD_IMP_WEBHOOK_URL);
+  url.searchParams.set("wait", "true");
+
   const payload = { content: text };
-  let attempts = 0;
-  const maxRetries = 3;
 
-  while (attempts < maxRetries) {
-    attempts++;
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetchFn(url.toString(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    const rawBody = await response.text();
+    let parsedBody = null;
+
     try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      parsedBody = rawBody ? JSON.parse(rawBody) : null;
+    } catch {
+      parsedBody = null;
+    }
 
-      console.log(`📨 Discord webhook response status: ${response.status}`);
+    if (response.status === 429) {
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfterJson = parsedBody?.retry_after;
+      const waitMs = retryAfterJson
+        ? Math.ceil(Number(retryAfterJson) * 1000)
+        : retryAfterHeader
+          ? Math.ceil(Number(retryAfterHeader) * 1000)
+          : null;
 
-      if (response.status === 429) {
-        const retryAfter = response.headers.get("retry-after");
-        const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : 5000;
-        console.warn(`⏸️ Discord rate limit. Retrying after ${waitMs / 1000}s...`);
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
-        continue;
+      console.warn("⏸️ Discord rate limited this request.");
+      if (waitMs) {
+        console.warn(`   Retry after: ${waitMs} ms`);
       }
+      console.warn(
+        "   Not retrying automatically, to avoid repeated 429/1015 blocks.",
+      );
+      return;
+    }
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`❌ Discord webhook error (${response.status}): ${errorText.substring(0, 500)}`);
-        return;
-      }
+    if (!response.ok) {
+      console.error(
+        `❌ Discord webhook error (${response.status}): ${rawBody.substring(0, 500)}`,
+      );
 
-      // Success – get message ID for auto‑delete
-      let messageId = null;
-      try {
-        const responseData = await response.json();
-        messageId = responseData.id;
-      } catch (jsonError) {
-        console.error("❌ Failed to parse Discord response JSON:", jsonError.message);
-        return;
-      }
-
-      if (messageId && DISCORD_WEBHOOK_ID && DISCORD_WEBHOOK_TOKEN) {
-        console.log(`✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`);
-        setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
-      } else if (messageId) {
-        console.log("✅ Discord /imp notification sent (auto‑delete unavailable – missing ID/token).");
-      } else {
-        console.log("✅ Discord /imp notification sent (no message ID returned).");
+      if (response.status === 403 || response.status === 503) {
+        console.error(
+          "🚫 Discord is blocking this request or the webhook is unreachable.",
+        );
       }
       return;
-    } catch (error) {
-      console.error(`🔥 Discord network error (attempt ${attempts}): ${error.message}`);
-      if (attempts < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      }
+    }
+
+    const messageId = parsedBody?.id || null;
+
+    if (messageId) {
+      console.log(
+        `✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`,
+      );
+      setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
+    } else {
+      console.log(
+        "✅ Discord /imp notification sent (message ID unavailable, auto-delete skipped).",
+      );
+    }
+  } catch (error) {
+    if (error.name === "AbortError") {
+      console.error("⏱️ Discord request timeout.");
+    } else {
+      console.error(`🔥 Discord network error: ${error.message}`);
     }
   }
-
-  console.error("❌ Failed to send Discord notification after all retries.");
 }
 
 async function deleteDiscordMessage(messageId) {
   if (!DISCORD_WEBHOOK_ID || !DISCORD_WEBHOOK_TOKEN) {
-    console.warn("⚠️ Cannot delete Discord message – missing webhook ID/token.");
+    console.warn(
+      "⚠️ Discord webhook ID/token missing – cannot delete message.",
+    );
     return;
   }
 
   const url = `https://discord.com/api/webhooks/${DISCORD_WEBHOOK_ID}/${DISCORD_WEBHOOK_TOKEN}/messages/${messageId}`;
 
   try {
-    const response = await fetch(url, { method: "DELETE" });
+    const response = await fetchFn(url, { method: "DELETE" });
+
     if (response.ok) {
       console.log(`✅ Discord message ${messageId} deleted after 10 minutes.`);
     } else if (response.status === 404) {
-      console.log(`ℹ️ Discord message ${messageId} already deleted.`);
+      console.log(
+        `ℹ️ Discord message ${messageId} already deleted or expired.`,
+      );
     } else {
       const errorText = await response.text();
-      console.error(`❌ Failed to delete Discord message ${messageId}: ${response.status} – ${errorText}`);
+      console.error(
+        `❌ Failed to delete Discord message ${messageId}: ${response.status} – ${errorText}`,
+      );
     }
   } catch (err) {
     console.error(`❌ Error deleting Discord message: ${err.message}`);
@@ -247,7 +290,12 @@ async function deleteDiscordMessage(messageId) {
 }
 
 // ---------- CENTRAL NOTIFICATION ----------
-async function sendNotification(title, description, type = "info", isJarifLogin = false) {
+async function sendNotification(
+  title,
+  description,
+  type = "info",
+  isJarifLogin = false,
+) {
   const now = Date.now();
 
   if (type === "message") {
@@ -261,13 +309,14 @@ async function sendNotification(title, description, type = "info", isJarifLogin 
     lastLoginNotificationTime = now;
   }
 
-  const emoji = {
-    message: "💬",
-    presence: "🟢",
-    offline: "🔴",
-    login: isJarifLogin ? "🚨" : "🔓",
-    block: "🚫",
-  }[type] || "ℹ️";
+  const emoji =
+    {
+      message: "💬",
+      presence: "🟢",
+      offline: "🔴",
+      login: isJarifLogin ? "🚨" : "🔓",
+      block: "🚫",
+    }[type] || "ℹ️";
 
   const bahrainTime = formatBahrainTime();
   const fullMessage = `${emoji} <b>${title}</b>\n\n${description}\n\n🕒 <i>${bahrainTime} (Bahrain)</i>`;
@@ -300,7 +349,9 @@ async function checkActivityForNotification(isActive) {
 
   let settings;
   try {
-    const snap = await db.ref(`ephemeral/notificationSettings/${USER_JARIF}`).once("value");
+    const snap = await db
+      .ref(`ephemeral/notificationSettings/${USER_JARIF}`)
+      .once("value");
     settings = snap.val() || {};
   } catch {
     settings = {};
@@ -311,11 +362,19 @@ async function checkActivityForNotification(isActive) {
 
   if (previousFiOnlineState && !nowOnline) {
     if (settings.offlineNotifications !== false) {
-      await sendNotification("Fi✨ went offline", `📅 <b>Time:</b> ${dateTime}`, "offline");
+      await sendNotification(
+        "Fi✨ went offline",
+        `📅 <b>Time:</b> ${dateTime}`,
+        "offline",
+      );
     }
   } else if (!previousFiOnlineState && nowOnline) {
     if (settings.activityNotifications !== false) {
-      await sendNotification("Fi✨ is now active", `📅 <b>Time:</b> ${dateTime}`, "presence");
+      await sendNotification(
+        "Fi✨ is now active",
+        `📅 <b>Time:</b> ${dateTime}`,
+        "presence",
+      );
     }
   }
 
@@ -332,7 +391,9 @@ async function checkMessageForNotification(message) {
 
   let settings;
   try {
-    const snap = await db.ref(`ephemeral/notificationSettings/${USER_JARIF}`).once("value");
+    const snap = await db
+      .ref(`ephemeral/notificationSettings/${USER_JARIF}`)
+      .once("value");
     settings = snap.val();
   } catch {
     settings = null;
@@ -356,9 +417,12 @@ async function checkMessageForNotification(message) {
     content = message.text;
   } else if (message.attachment) {
     if (message.attachment.isVoiceMessage) content = "🎤 Voice message";
-    else if (message.attachment.type?.startsWith("image/")) content = "🖼️ Image";
-    else if (message.attachment.type?.startsWith("video/")) content = "🎬 Video";
-    else if (message.attachment.type?.startsWith("audio/")) content = "🔊 Audio file";
+    else if (message.attachment.type?.startsWith("image/"))
+      content = "🖼️ Image";
+    else if (message.attachment.type?.startsWith("video/"))
+      content = "🎬 Video";
+    else if (message.attachment.type?.startsWith("audio/"))
+      content = "🔊 Audio file";
     else content = `📎 File: ${message.attachment.name || "Attachment"}`;
   } else {
     content = "Empty message";
@@ -367,12 +431,14 @@ async function checkMessageForNotification(message) {
   if (content.length > 1000) content = content.slice(0, 1000) + "…";
 
   const dateTime = formatBahrainDateTime(message.timestampFull);
-  console.log(`📨 Sending Telegram notification for Fidha message (Jarif offline): ${content.substring(0, 50)}`);
+  console.log(
+    `📨 Sending Telegram notification for Fidha message (Jarif offline): ${content.substring(0, 50)}`,
+  );
 
   await sendNotification(
     "📩 New message from Fi✨",
     `<b>Message:</b> ${content}\n<b>Time:</b> ${dateTime}`,
-    "message"
+    "message",
   );
 
   processedMessageIds.add(message.id);
@@ -396,7 +462,9 @@ async function checkImpMessageForDiscord(message) {
     arr.slice(-500).forEach((id) => processedImpMessageIds.add(id));
   }
 
-  console.log(`🚨 /imp message detected (ID: ${message.id}) – sending Discord notification.`);
+  console.log(
+    `🚨 /imp message detected (ID: ${message.id}) – sending Discord notification.`,
+  );
 
   const discordText = `<@1481266690410020996> This channel has been set up to receive official Discord announcements for admins and moderators of Public servers. We'll let you know about important updates, such as new moderation features or changes to your server's eligibility for Server Discovery, here.
 
@@ -437,7 +505,7 @@ async function checkJarifLoginForNotification(loginData) {
     "🚨 Jarif logged in",
     details + `\n\n<b>Login Time:</b> ${dateTime}`,
     "login",
-    true
+    true,
   );
 
   lastDeviceNotificationTimes.set(deviceId, now);
@@ -462,7 +530,7 @@ async function checkJarifLoginForNotification(loginData) {
   }
 }
 
-// ---------- LOGIN PAGE ACCESS (NON‑JARIF) ----------
+// ---------- LOGIN PAGE ACCESS (NON-JARIF) ----------
 async function checkLoginPageAccess(loginData) {
   const userId = loginData.userId || "Unknown user";
   if (userId === USER_JARIF || userId.includes(USER_JARIF)) return;
@@ -483,7 +551,7 @@ async function checkLoginPageAccess(loginData) {
     "🔓 Login page accessed",
     `<b>User:</b> ${userId}\n${deviceInfo}\n<b>User Agent:</b> ${ua.length > 800 ? ua.slice(0, 800) + "…" : ua}\n<b>Time:</b> ${dateTime}`,
     "login",
-    false
+    false,
   );
 }
 
@@ -559,7 +627,10 @@ setInterval(async () => {
   const fiveMinAgo = Date.now() - 300000;
   Object.keys(records).forEach((key) => {
     if (records[key].timestamp && records[key].timestamp < fiveMinAgo) {
-      ref.child(key).remove().catch(() => {});
+      ref
+        .child(key)
+        .remove()
+        .catch(() => {});
     }
   });
 }, 300000);
@@ -579,7 +650,9 @@ setInterval(() => {
 setInterval(checkJarifPresence, 30000);
 
 // ---------- EXPRESS ENDPOINTS ----------
-app.get("/", (req, res) => res.send("Telegram Notification Server is running."));
+app.get("/", (req, res) =>
+  res.send("Telegram Notification Server is running."),
+);
 app.get("/health", (req, res) => res.send("OK"));
 app.get("/status", (req, res) => {
   res.json({
@@ -603,7 +676,9 @@ app.listen(PORT, () => {
   console.log(`   Port: ${PORT}`);
   console.log(`   Bot Token: ${TELEGRAM_BOT_TOKEN ? "✓" : "✗"}`);
   console.log(`   Chat ID: ${TELEGRAM_CHAT_ID ? "✓" : "✗"}`);
-  console.log(`   Discord /imp Webhook: ${DISCORD_IMP_WEBHOOK_URL ? "✓" : "✗"}`);
+  console.log(
+    `   Discord /imp Webhook: ${DISCORD_IMP_WEBHOOK_URL ? "✓" : "✗"}`,
+  );
   console.log(`   Database URL: ${FIREBASE_DATABASE_URL}`);
   console.log("=========================================");
 });

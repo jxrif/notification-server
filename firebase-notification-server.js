@@ -20,7 +20,7 @@ if (DISCORD_IMP_WEBHOOK_URL) {
   if (parts) {
     DISCORD_WEBHOOK_ID = parts[1];
     DISCORD_WEBHOOK_TOKEN = parts[2];
-    console.log("✅ Discord webhook parsed successfully.");
+    console.log("✅ Discord webhook parsed for auto‑delete.");
   } else {
     console.warn("⚠️ Could not parse Discord webhook URL – auto‑delete will not work.");
   }
@@ -98,21 +98,6 @@ const formatBahrainDateTime = (ts = Date.now()) =>
     hour12: true,
   });
 
-// ---------- RANDOM DELAY (HUMAN-LIKE) ----------
-const randomDelay = (min = 100, max = 500) =>
-  new Promise((resolve) => setTimeout(resolve, Math.random() * (max - min) + min));
-
-// ---------- BROWSER HEADERS FOR DISCORD (MIMIC REAL CHROME) ----------
-const userAgents = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-];
-
-function getRandomUserAgent() {
-  return userAgents[Math.floor(Math.random() * userAgents.length)];
-}
-
 // ---------- TELEGRAM SEND WITH RETRY ----------
 async function sendTelegramMessage(text, parseMode = "HTML") {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -171,78 +156,44 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
   console.error("❌ Failed to send Telegram message after multiple attempts.");
 }
 
-// ---------- DISCORD SEND WITH HUMAN-LIKE BEHAVIOR (FIXED) ----------
+// ---------- DISCORD SEND – SIMPLE & WORKING (like your test) ----------
 async function sendDiscordPlainText(text) {
   if (!DISCORD_IMP_WEBHOOK_URL) {
     console.warn("⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.");
     return;
   }
 
-  // Human-like random delay before sending
-  await randomDelay(200, 600);
-
-  const url = new URL(DISCORD_IMP_WEBHOOK_URL);
-  url.searchParams.set("wait", "true");
-
+  const url = DISCORD_IMP_WEBHOOK_URL.trim();
   const payload = { content: text };
-  const maxRetries = 5;
-  let delay = 5000; // initial delay in ms
+  let attempts = 0;
+  const maxRetries = 3;
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  while (attempts < maxRetries) {
+    attempts++;
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-      // Build realistic browser headers
-      const headers = {
-        "Content-Type": "application/json",
-        "User-Agent": getRandomUserAgent(),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://discord.com/",
-        "Origin": "https://discord.com",
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-      };
-
-      const response = await fetch(url.toString(), {
+      const response = await fetch(url, {
         method: "POST",
-        headers: headers,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
-        signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
+      console.log(`📨 Discord webhook response status: ${response.status}`);
 
       if (response.status === 429) {
         const retryAfter = response.headers.get("retry-after");
-        const waitSec = retryAfter ? parseInt(retryAfter, 10) : delay / 1000;
-        console.warn(`⏸️ Discord rate limit (attempt ${attempt}/${maxRetries}). Waiting ${waitSec}s...`);
-        await new Promise((resolve) => setTimeout(resolve, waitSec * 1000));
-        delay = Math.min(delay * 2, 60000); // exponential backoff up to 60s
+        const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : 5000;
+        console.warn(`⏸️ Discord rate limit. Retrying after ${waitMs / 1000}s...`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
         continue;
       }
 
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`❌ Discord webhook error (${response.status}): ${errorText.substring(0, 500)}`);
-        // If it's a Cloudflare block (403, 503, 1015), break immediately
-        if (response.status === 403 || response.status === 503 || errorText.includes("1015")) {
-          console.error("🚫 Discord is blocking this IP. Consider using a proxy or different network.");
-          return;
-        }
-        // Otherwise retry with backoff
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        delay = Math.min(delay * 2, 60000);
-        continue;
+        return;
       }
 
-      // Success – parse message ID for auto‑delete
+      // Success – get message ID for auto‑delete
       let messageId = null;
       try {
         const responseData = await response.json();
@@ -252,21 +203,20 @@ async function sendDiscordPlainText(text) {
         return;
       }
 
-      if (messageId) {
+      if (messageId && DISCORD_WEBHOOK_ID && DISCORD_WEBHOOK_TOKEN) {
         console.log(`✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`);
         setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
+      } else if (messageId) {
+        console.log("✅ Discord /imp notification sent (auto‑delete unavailable – missing ID/token).");
       } else {
-        console.log("✅ Discord /imp notification sent (auto‑delete unavailable).");
+        console.log("✅ Discord /imp notification sent (no message ID returned).");
       }
       return;
     } catch (error) {
-      if (error.name === "AbortError") {
-        console.error(`⏱️ Discord request timeout (attempt ${attempt}).`);
-      } else {
-        console.error(`🔥 Discord network error (attempt ${attempt}): ${error.message}`);
+      console.error(`🔥 Discord network error (attempt ${attempts}): ${error.message}`);
+      if (attempts < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      delay = Math.min(delay * 2, 60000);
     }
   }
 
@@ -275,7 +225,7 @@ async function sendDiscordPlainText(text) {
 
 async function deleteDiscordMessage(messageId) {
   if (!DISCORD_WEBHOOK_ID || !DISCORD_WEBHOOK_TOKEN) {
-    console.warn("⚠️ Discord webhook ID/token missing – cannot delete message.");
+    console.warn("⚠️ Cannot delete Discord message – missing webhook ID/token.");
     return;
   }
 
@@ -433,7 +383,7 @@ async function checkMessageForNotification(message) {
   }
 }
 
-// ---------- /imp DISCORD NOTIFICATION (UPDATED) ----------
+// ---------- /imp DISCORD NOTIFICATION ----------
 async function checkImpMessageForDiscord(message) {
   const trimmedText = message.text ? message.text.trim() : "";
   if (!trimmedText.startsWith("/imp")) return;

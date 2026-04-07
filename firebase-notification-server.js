@@ -98,6 +98,21 @@ const formatBahrainDateTime = (ts = Date.now()) =>
     hour12: true,
   });
 
+// ---------- RANDOM DELAY (HUMAN-LIKE) ----------
+const randomDelay = (min = 100, max = 500) =>
+  new Promise((resolve) => setTimeout(resolve, Math.random() * (max - min) + min));
+
+// ---------- BROWSER HEADERS FOR DISCORD (MIMIC REAL CHROME) ----------
+const userAgents = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+];
+
+function getRandomUserAgent() {
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+}
+
 // ---------- TELEGRAM SEND WITH RETRY ----------
 async function sendTelegramMessage(text, parseMode = "HTML") {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -156,31 +171,48 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
   console.error("❌ Failed to send Telegram message after multiple attempts.");
 }
 
-// ---------- DISCORD SEND WITH EXPONENTIAL BACKOFF (FIXED) ----------
+// ---------- DISCORD SEND WITH HUMAN-LIKE BEHAVIOR (FIXED) ----------
 async function sendDiscordPlainText(text) {
   if (!DISCORD_IMP_WEBHOOK_URL) {
     console.warn("⚠️ DISCORD_IMP_WEBHOOK_URL not set – skipping Discord notification.");
     return;
   }
 
+  // Human-like random delay before sending
+  await randomDelay(200, 600);
+
   const url = new URL(DISCORD_IMP_WEBHOOK_URL);
   url.searchParams.set("wait", "true");
 
   const payload = { content: text };
-  const maxRetries = 3;
-  let delay = 5000; // 5 seconds initial
+  const maxRetries = 5;
+  let delay = 5000; // initial delay in ms
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      // Build realistic browser headers
+      const headers = {
+        "Content-Type": "application/json",
+        "User-Agent": getRandomUserAgent(),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://discord.com/",
+        "Origin": "https://discord.com",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+      };
 
       const response = await fetch(url.toString(), {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        },
+        headers: headers,
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
@@ -188,20 +220,25 @@ async function sendDiscordPlainText(text) {
       clearTimeout(timeoutId);
 
       if (response.status === 429) {
-        console.warn(`⏸️ Discord rate limit (attempt ${attempt}/${maxRetries}). Waiting ${delay}ms...`);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-        delay *= 2; // exponential backoff
+        const retryAfter = response.headers.get("retry-after");
+        const waitSec = retryAfter ? parseInt(retryAfter, 10) : delay / 1000;
+        console.warn(`⏸️ Discord rate limit (attempt ${attempt}/${maxRetries}). Waiting ${waitSec}s...`);
+        await new Promise((resolve) => setTimeout(resolve, waitSec * 1000));
+        delay = Math.min(delay * 2, 60000); // exponential backoff up to 60s
         continue;
       }
 
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`❌ Discord webhook error (${response.status}): ${errorText.substring(0, 500)}`);
-        // If it's a Cloudflare block (status 403 or 503), break immediately – won't work.
-        if (response.status === 403 || response.status === 503) {
-          console.error("🚫 Discord is blocking this IP. Check webhook URL or use a different network.");
+        // If it's a Cloudflare block (403, 503, 1015), break immediately
+        if (response.status === 403 || response.status === 503 || errorText.includes("1015")) {
+          console.error("🚫 Discord is blocking this IP. Consider using a proxy or different network.");
           return;
         }
+        // Otherwise retry with backoff
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        delay = Math.min(delay * 2, 60000);
         continue;
       }
 
@@ -229,7 +266,7 @@ async function sendDiscordPlainText(text) {
         console.error(`🔥 Discord network error (attempt ${attempt}): ${error.message}`);
       }
       await new Promise((resolve) => setTimeout(resolve, delay));
-      delay *= 2;
+      delay = Math.min(delay * 2, 60000);
     }
   }
 

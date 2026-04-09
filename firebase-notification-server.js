@@ -1,17 +1,10 @@
 // firebase-notification-server.js
 const express = require("express");
 const admin = require("firebase-admin");
+const fetch = require("node-fetch");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// Use built-in fetch on Node 18+, otherwise fall back to node-fetch
-const fetchFn = global.fetch
-  ? global.fetch.bind(global)
-  : async (...args) => {
-      const mod = await import("node-fetch");
-      return mod.default(...args);
-    };
 
 // ---------- TELEGRAM ----------
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -27,10 +20,12 @@ if (DISCORD_IMP_WEBHOOK_URL) {
   if (parts) {
     DISCORD_WEBHOOK_ID = parts[1];
     DISCORD_WEBHOOK_TOKEN = parts[2];
-    console.log("✅ Discord webhook parsed successfully.");
+    console.log(
+      "✅ Discord webhook parsed successfully (auto‑delete enabled).",
+    );
   } else {
     console.warn(
-      "⚠️ Could not parse Discord webhook URL – auto-delete will not work.",
+      "⚠️ Could not parse Discord webhook URL – auto‑delete will not work, but messages will still be sent.",
     );
   }
 }
@@ -47,10 +42,10 @@ const USER_FIDHA = "Fidha";
 const USER_JARIF = "Jarif";
 
 // ---------- COOLDOWNS ----------
-const MESSAGE_COOLDOWN = 3000;
-const PRESENCE_COOLDOWN = 5000;
-const LOGIN_COOLDOWN = 0;
-const DEVICE_NOTIFICATION_COOLDOWN = 30000;
+const MESSAGE_COOLDOWN = 3000; // 3 seconds
+const PRESENCE_COOLDOWN = 5000; // 5 seconds
+const LOGIN_COOLDOWN = 0; // immediate
+const DEVICE_NOTIFICATION_COOLDOWN = 30000; // 30 seconds
 
 // ---------- STATE ----------
 let jarifIsActuallyOffline = true;
@@ -59,14 +54,14 @@ let previousFiOnlineState = false;
 const processedMessageIds = new Set();
 const processedPresenceEvents = new Set();
 const processedJarifLoginIds = new Set();
-const processedImpMessageIds = new Set();
+const processedImpMessageIds = new Set(); // for /imp Discord notifications
 const lastDeviceNotificationTimes = new Map();
 
 let lastMessageNotificationTime = 0;
 let lastPresenceNotificationTime = 0;
 let lastLoginNotificationTime = 0;
 
-// ---------- FIREBASE ----------
+// ---------- FIREBASE – IMPORTANT: USE YOUR REAL DATABASE URL ----------
 const FIREBASE_DATABASE_URL =
   "https://ephemeral-chat-three-default-rtdb.firebaseio.com";
 
@@ -85,7 +80,7 @@ admin.initializeApp({
 });
 const db = admin.database();
 
-// ---------- TIME FORMATTERS ----------
+// ---------- TIME FORMATTERS (Bahrain) ----------
 const formatBahrainTime = (ts = Date.now()) =>
   new Date(ts).toLocaleTimeString("en-US", {
     timeZone: "Asia/Bahrain",
@@ -107,7 +102,7 @@ const formatBahrainDateTime = (ts = Date.now()) =>
     hour12: true,
   });
 
-// ---------- TELEGRAM SEND WITH RETRY ----------
+// ---------- TELEGRAM SEND WITH AUTO‑RETRY ON 429 ----------
 async function sendTelegramMessage(text, parseMode = "HTML") {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
@@ -127,7 +122,7 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-      const response = await fetchFn(TELEGRAM_API_URL, {
+      const response = await fetch(TELEGRAM_API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -167,7 +162,7 @@ async function sendTelegramMessage(text, parseMode = "HTML") {
   console.error("❌ Failed to send Telegram message after multiple attempts.");
 }
 
-// ---------- DISCORD SEND (SINGLE ATTEMPT, NO RETRY LOOP) ----------
+// ---------- DISCORD PLAIN TEXT SEND (for /imp messages) with auto‑delete after 10 minutes ----------
 async function sendDiscordPlainText(text) {
   if (!DISCORD_IMP_WEBHOOK_URL) {
     console.warn(
@@ -176,78 +171,55 @@ async function sendDiscordPlainText(text) {
     return;
   }
 
+  // Build URL with ?wait=true to get the message ID
   const url = new URL(DISCORD_IMP_WEBHOOK_URL);
   url.searchParams.set("wait", "true");
 
-  const payload = { content: text };
+  const payload = { content: text }; // plain text only
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-    const response = await fetchFn(url.toString(), {
+    const response = await fetch(url.toString(), {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
 
     clearTimeout(timeoutId);
 
-    const rawBody = await response.text();
-    let parsedBody = null;
-
-    try {
-      parsedBody = rawBody ? JSON.parse(rawBody) : null;
-    } catch {
-      parsedBody = null;
-    }
-
-    if (response.status === 429) {
-      const retryAfterHeader = response.headers.get("retry-after");
-      const retryAfterJson = parsedBody?.retry_after;
-      const waitMs = retryAfterJson
-        ? Math.ceil(Number(retryAfterJson) * 1000)
-        : retryAfterHeader
-          ? Math.ceil(Number(retryAfterHeader) * 1000)
-          : null;
-
-      console.warn("⏸️ Discord rate limited this request.");
-      if (waitMs) {
-        console.warn(`   Retry after: ${waitMs} ms`);
-      }
-      console.warn(
-        "   Not retrying automatically, to avoid repeated 429/1015 blocks.",
-      );
-      return;
-    }
-
     if (!response.ok) {
+      const errorText = await response.text();
       console.error(
-        `❌ Discord webhook error (${response.status}): ${rawBody.substring(0, 500)}`,
+        `❌ Discord webhook error (${response.status}): ${errorText}`,
       );
-
-      if (response.status === 403 || response.status === 503) {
-        console.error(
-          "🚫 Discord is blocking this request or the webhook is unreachable.",
-        );
-      }
       return;
     }
 
-    const messageId = parsedBody?.id || null;
+    // Discord should now return the message object because of ?wait=true
+    let messageId = null;
+    try {
+      const responseData = await response.json();
+      messageId = responseData.id;
+    } catch (jsonError) {
+      console.error(
+        "❌ Failed to parse Discord response JSON even with ?wait=true:",
+        jsonError.message,
+      );
+      return;
+    }
 
     if (messageId) {
       console.log(
         `✅ Discord /imp notification sent. Message ID: ${messageId} – will delete in 10 minutes.`,
       );
+      // Schedule deletion after 10 minutes
       setTimeout(() => deleteDiscordMessage(messageId), 10 * 60 * 1000);
     } else {
       console.log(
-        "✅ Discord /imp notification sent (message ID unavailable, auto-delete skipped).",
+        "✅ Discord /imp notification sent but no message ID returned (auto‑delete not available).",
       );
     }
   } catch (error) {
@@ -259,6 +231,7 @@ async function sendDiscordPlainText(text) {
   }
 }
 
+// Delete a Discord message using the webhook
 async function deleteDiscordMessage(messageId) {
   if (!DISCORD_WEBHOOK_ID || !DISCORD_WEBHOOK_TOKEN) {
     console.warn(
@@ -270,13 +243,14 @@ async function deleteDiscordMessage(messageId) {
   const url = `https://discord.com/api/webhooks/${DISCORD_WEBHOOK_ID}/${DISCORD_WEBHOOK_TOKEN}/messages/${messageId}`;
 
   try {
-    const response = await fetchFn(url, { method: "DELETE" });
+    const response = await fetch(url, { method: "DELETE" });
 
     if (response.ok) {
       console.log(`✅ Discord message ${messageId} deleted after 10 minutes.`);
     } else if (response.status === 404) {
+      // Message already deleted or never existed – ignore quietly
       console.log(
-        `ℹ️ Discord message ${messageId} already deleted or expired.`,
+        `ℹ️ Discord message ${messageId} already deleted or not found (nothing to do).`,
       );
     } else {
       const errorText = await response.text();
@@ -289,7 +263,7 @@ async function deleteDiscordMessage(messageId) {
   }
 }
 
-// ---------- CENTRAL NOTIFICATION ----------
+// ---------- CENTRAL NOTIFICATION DISPATCHER (unchanged) ----------
 async function sendNotification(
   title,
   description,
@@ -298,6 +272,7 @@ async function sendNotification(
 ) {
   const now = Date.now();
 
+  // ---- Cooldowns ----
   if (type === "message") {
     if (now - lastMessageNotificationTime < MESSAGE_COOLDOWN) return;
     lastMessageNotificationTime = now;
@@ -309,6 +284,7 @@ async function sendNotification(
     lastLoginNotificationTime = now;
   }
 
+  // ---- Emoji ----
   const emoji =
     {
       message: "💬",
@@ -342,7 +318,7 @@ async function checkJarifPresence() {
   }
 }
 
-// ---------- FIDHA ACTIVITY ----------
+// ---------- FIDHA ACTIVITY (ONLINE / OFFLINE) ----------
 async function checkActivityForNotification(isActive) {
   await checkJarifPresence();
   if (!jarifIsActuallyOffline) return;
@@ -381,12 +357,13 @@ async function checkActivityForNotification(isActive) {
   previousFiOnlineState = nowOnline;
 }
 
-// ---------- FIDHA MESSAGES (OFFLINE NOTIFICATION) ----------
+// ---------- FIDHA'S MESSAGES (WHEN JARIF OFFLINE) ----------
 async function checkMessageForNotification(message) {
   if (message.sender !== USER_FIDHA) return;
 
   await checkJarifPresence();
   if (!jarifIsActuallyOffline) return;
+
   if (processedMessageIds.has(message.id)) return;
 
   let settings;
@@ -398,6 +375,7 @@ async function checkMessageForNotification(message) {
   } catch {
     settings = null;
   }
+
   if (!settings) {
     settings = {
       messageNotifications: true,
@@ -409,8 +387,11 @@ async function checkMessageForNotification(message) {
 
   if (!settings.messageNotifications) return;
 
-  // Only skip if Jarif has already READ the message (not saved)
-  if (message.readBy && message.readBy[USER_JARIF]) return;
+  if (
+    (message.savedBy && message.savedBy[USER_JARIF]) ||
+    (message.readBy && message.readBy[USER_JARIF])
+  )
+    return;
 
   let content;
   if (message.text) {
@@ -431,9 +412,6 @@ async function checkMessageForNotification(message) {
   if (content.length > 1000) content = content.slice(0, 1000) + "…";
 
   const dateTime = formatBahrainDateTime(message.timestampFull);
-  console.log(
-    `📨 Sending Telegram notification for Fidha message (Jarif offline): ${content.substring(0, 50)}`,
-  );
 
   await sendNotification(
     "📩 New message from Fi✨",
@@ -449,11 +427,12 @@ async function checkMessageForNotification(message) {
   }
 }
 
-// ---------- /imp DISCORD NOTIFICATION ----------
+// ---------- /imp message to Discord ----------
 async function checkImpMessageForDiscord(message) {
-  const trimmedText = message.text ? message.text.trim() : "";
-  if (!trimmedText.startsWith("/imp")) return;
+  // Check if message starts with "/imp"
+  if (!message.text || !message.text.startsWith("/imp")) return;
 
+  // Avoid duplicates
   if (processedImpMessageIds.has(message.id)) return;
   processedImpMessageIds.add(message.id);
   if (processedImpMessageIds.size > 1000) {
@@ -466,6 +445,7 @@ async function checkImpMessageForDiscord(message) {
     `🚨 /imp message detected (ID: ${message.id}) – sending Discord notification.`,
   );
 
+  // Exact text required
   const discordText = `<@1481266690410020996> This channel has been set up to receive official Discord announcements for admins and moderators of Public servers. We'll let you know about important updates, such as new moderation features or changes to your server's eligibility for Server Discovery, here.
 
 You can change which channel these messages are sent to at any time inside Server Settings. We recommend choosing a moderators-only channel, as some information may be sensitive to your server.
@@ -475,7 +455,7 @@ Thanks for choosing Discord as the place to build your community!`;
   await sendDiscordPlainText(discordText);
 }
 
-// ---------- JARIF LOGIN NOTIFICATION ----------
+// ---------- JARIF LOGIN (IMMEDIATE) ----------
 async function checkJarifLoginForNotification(loginData) {
   const deviceInfo = loginData.deviceInfo || {};
   const deviceId = deviceInfo.deviceId || "unknown";
@@ -530,7 +510,7 @@ async function checkJarifLoginForNotification(loginData) {
   }
 }
 
-// ---------- LOGIN PAGE ACCESS (NON-JARIF) ----------
+// ---------- LOGIN PAGE ACCESS (NON‑JARIF) ----------
 async function checkLoginPageAccess(loginData) {
   const userId = loginData.userId || "Unknown user";
   if (userId === USER_JARIF || userId.includes(USER_JARIF)) return;
@@ -542,10 +522,10 @@ async function checkLoginPageAccess(loginData) {
   const type = loginData.deviceType || "Unknown";
   const platform = loginData.platform || "Unknown";
   const screen = loginData.screenSize || "Unknown";
-  const windowSize = loginData.windowSize || "Unknown";
+  const window = loginData.windowSize || "Unknown";
   const ua = loginData.userAgent || "Unknown";
 
-  const deviceInfo = `<b>Device ID:</b> <code>${deviceId}</code>\n<b>Model:</b> ${model} (${type})\n<b>Platform:</b> ${platform}\n<b>Screen:</b> ${screen}\n<b>Window:</b> ${windowSize}`;
+  const deviceInfo = `<b>Device ID:</b> <code>${deviceId}</code>\n<b>Model:</b> ${model} (${type})\n<b>Platform:</b> ${platform}\n<b>Screen:</b> ${screen}\n<b>Window:</b> ${window}`;
 
   await sendNotification(
     "🔓 Login page accessed",
@@ -559,19 +539,25 @@ async function checkLoginPageAccess(loginData) {
 function startFirebaseListeners() {
   console.log("🔥 Starting Firebase listeners (Telegram + /imp Discord)...");
 
+  // --- Messages: process recent messages, ignore edits ---
   const messagesRef = db.ref("ephemeral/messages");
   messagesRef.on("child_added", async (snapshot) => {
     const msg = snapshot.val();
     if (!msg) return;
     msg.id = snapshot.key;
 
+    // Only consider messages from last 5 minutes
     const msgTime = msg.timestampFull || Date.now();
     if (Date.now() - msgTime > 5 * 60 * 1000) return;
 
+    // --- Existing Fidha notification check ---
     await checkMessageForNotification(msg);
+
+    // --- /imp Discord notification check (any sender) ---
     await checkImpMessageForDiscord(msg);
   });
 
+  // --- Fidha presence ---
   let lastFiState = null;
   db.ref("ephemeral/presence/Fidha").on("value", async (snapshot) => {
     const val = snapshot.val();
@@ -581,6 +567,7 @@ function startFirebaseListeners() {
     await checkActivityForNotification(isActive);
   });
 
+  // --- Jarif presence ---
   db.ref("ephemeral/presence/Jarif").on("value", async (snapshot) => {
     const val = snapshot.val();
     if (val) {
@@ -592,6 +579,7 @@ function startFirebaseListeners() {
     }
   });
 
+  // --- Login page access ---
   const loginAccessRef = db.ref("ephemeral/loginAccess");
   loginAccessRef.on("child_added", async (snapshot) => {
     const data = snapshot.val();
@@ -600,6 +588,7 @@ function startFirebaseListeners() {
     setTimeout(() => snapshot.ref.remove().catch(() => {}), 1000);
   });
 
+  // --- Jarif explicit logins ---
   const jarifLoginRef = db.ref("ephemeral/jarifLogins");
   jarifLoginRef.on("child_added", async (snapshot) => {
     const data = snapshot.val();
@@ -610,6 +599,7 @@ function startFirebaseListeners() {
     setTimeout(() => snapshot.ref.remove().catch(() => {}), 30000);
   });
 
+  // --- Blocked devices – log only ---
   db.ref("ephemeral/blockedDevices").on("child_added", (snapshot) => {
     const block = snapshot.val();
     if (block?.deviceId) {
@@ -618,7 +608,7 @@ function startFirebaseListeners() {
   });
 }
 
-// ---------- PERIODIC CLEANUP ----------
+// ---------- PERIODIC CLEANUP (unchanged) ----------
 setInterval(async () => {
   const ref = db.ref("ephemeral/loginAccess");
   const snap = await ref.once("value");
@@ -683,6 +673,7 @@ app.listen(PORT, () => {
   console.log("=========================================");
 });
 
+// Graceful shutdown
 process.on("SIGTERM", () => process.exit(0));
 process.on("SIGINT", () => process.exit(0));
 process.on("uncaughtException", (err) => {
